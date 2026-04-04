@@ -193,6 +193,15 @@ const hermesLocalAdapter: ServerAdapterModule = {
 
 const adaptersByType = new Map<string, ServerAdapterModule>();
 
+// For builtin types that are overridden by an external adapter, we keep the
+// original builtin so it can be restored when the override is deactivated.
+const builtinFallbacks = new Map<string, ServerAdapterModule>();
+
+// Tracks which override types are currently deactivated (paused).  When
+// paused, `getServerAdapter()` returns the builtin fallback instead of the
+// external.  Persisted across reloads via the same disabled-adapters store.
+const pausedOverrides = new Set<string>();
+
 function registerBuiltInAdapters() {
   for (const adapter of [
     claudeLocalAdapter,
@@ -237,8 +246,13 @@ const externalAdaptersReady: Promise<void> = (async () => {
       const overriding = BUILTIN_ADAPTER_TYPES.has(externalAdapter.type);
       if (overriding) {
         console.log(
-          `[paperclip] External adapter \"${externalAdapter.type}\" overrides built-in adapter`,
+          `[paperclip] External adapter "${externalAdapter.type}" overrides built-in adapter`,
         );
+        // Save the original builtin for later restoration.
+        const existing = adaptersByType.get(externalAdapter.type);
+        if (existing && !builtinFallbacks.has(externalAdapter.type)) {
+          builtinFallbacks.set(externalAdapter.type, existing);
+        }
       }
       adaptersByType.set(
         externalAdapter.type,
@@ -281,6 +295,10 @@ export function requireServerAdapter(type: string): ServerAdapterModule {
 }
 
 export function getServerAdapter(type: string): ServerAdapterModule {
+  if (pausedOverrides.has(type)) {
+    const fallback = builtinFallbacks.get(type);
+    if (fallback) return fallback;
+  }
   return adaptersByType.get(type) ?? processAdapter;
 }
 
@@ -324,6 +342,49 @@ export async function detectAdapterModel(
     source: detected.source,
     ...(detected.candidates?.length ? { candidates: detected.candidates } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Override pause / resume
+// ---------------------------------------------------------------------------
+
+/**
+ * Pause or resume an external override for a builtin adapter type.
+ *
+ * - `paused = true`  → subsequent calls to `getServerAdapter(type)` return
+ *   the builtin fallback instead of the external adapter.  Already-running
+ *   agent sessions are unaffected (they hold a reference to the module they
+ *   started with).
+ *
+ * - `paused = false` → the external adapter is active again.
+ *
+ * Returns `true` if the state actually changed, `false` if the type is not
+ * an override or was already in the requested state.
+ */
+export function setOverridePaused(type: string, paused: boolean): boolean {
+  if (!builtinFallbacks.has(type)) return false;
+  const wasPaused = pausedOverrides.has(type);
+  if (paused && !wasPaused) {
+    pausedOverrides.add(type);
+    console.log(`[paperclip] Override paused for "${type}" — builtin adapter restored`);
+    return true;
+  }
+  if (!paused && wasPaused) {
+    pausedOverrides.delete(type);
+    console.log(`[paperclip] Override resumed for "${type}" — external adapter active`);
+    return true;
+  }
+  return false;
+}
+
+/** Check whether the external override for a builtin type is currently paused. */
+export function isOverridePaused(type: string): boolean {
+  return pausedOverrides.has(type);
+}
+
+/** Get the set of types whose overrides are currently paused. */
+export function getPausedOverrides(): Set<string> {
+  return pausedOverrides;
 }
 
 export function findServerAdapter(type: string): ServerAdapterModule | null {

@@ -19,6 +19,8 @@ export interface AdapterInfo {
   isLocalPath?: boolean;
   /** True when an external plugin has replaced a built-in adapter of the same type. */
   overriddenBuiltin?: boolean;
+  /** True when the external override for a builtin type is currently paused. */
+  overridePaused?: boolean;
 }
 
 export interface AdapterInstallResult {
@@ -42,6 +44,10 @@ export const adaptersApi = {
   /** Enable or disable an adapter (disabled adapters hidden from agent menus). */
   setDisabled: (type: string, disabled: boolean) =>
     api.patch<{ type: string; disabled: boolean; changed: boolean }>(`/adapters/${type}`, { disabled }),
+
+  /** Pause or resume an external override of a builtin type. */
+  setOverridePaused: (type: string, paused: boolean) =>
+    api.patch<{ type: string; paused: boolean; changed: boolean }>(`/adapters/${type}/override`, { paused }),
 
   /** Reload an external adapter (bust server + client caches). */
   reload: (type: string) =>

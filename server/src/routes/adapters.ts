@@ -23,6 +23,8 @@ import {
   listEnabledServerAdapters,
   registerServerAdapter,
   unregisterServerAdapter,
+  isOverridePaused,
+  setOverridePaused,
 } from "../adapters/registry.js";
 import { getAdapterSessionManagement } from "@paperclipai/adapter-utils";
 import {
@@ -65,6 +67,8 @@ interface AdapterInfo {
   disabled: boolean;
   /** True when an external plugin has replaced a built-in adapter of the same type. */
   overriddenBuiltin?: boolean;
+  /** True when the external override for a builtin type is currently paused. */
+  overridePaused?: boolean;
   version?: string;
   packageName?: string;
   isLocalPath?: boolean;
@@ -108,6 +112,7 @@ function buildAdapterInfo(adapter: ServerAdapterModule, externalRecord: AdapterP
     loaded: true, // If it's in the registry, it's loaded
     disabled: disabledSet.has(adapter.type),
     overriddenBuiltin: externalRecord ? BUILTIN_ADAPTER_TYPES.has(adapter.type) : undefined,
+    overridePaused: BUILTIN_ADAPTER_TYPES.has(adapter.type) ? isOverridePaused(adapter.type) : undefined,
     // Prefer on-disk package.json so the UI reflects bumps without relying on store-only fields.
     version: fromDisk ?? externalRecord?.version,
     packageName: externalRecord?.packageName,
@@ -350,6 +355,37 @@ export function adapterRoutes() {
     }
 
     res.json({ type: adapterType, disabled, changed });
+  });
+
+  /**
+   * PATCH /api/adapters/:type/override
+   *
+   * Pause or resume an external adapter's override of a builtin type.
+   * When paused, the server returns the builtin adapter for all new requests
+   * (execute, listModels, config schema, etc.).  Already-running sessions
+   * keep the adapter they started with.
+   */
+  router.patch("/adapters/:type/override", async (req, res) => {
+    assertBoard(req);
+
+    const adapterType = req.params.type;
+    const { paused } = req.body as { paused?: boolean };
+
+    if (typeof paused !== "boolean") {
+      res.status(400).json({ error: "\"paused\" (boolean) is required in request body." });
+      return;
+    }
+
+    if (!BUILTIN_ADAPTER_TYPES.has(adapterType)) {
+      res.status(400).json({ error: `Type "${adapterType}" is not a builtin adapter.` });
+      return;
+    }
+
+    const changed = setOverridePaused(adapterType, paused);
+
+    logger.info({ type: adapterType, paused, changed }, "Adapter override toggle");
+
+    res.json({ type: adapterType, paused, changed });
   });
 
   /**

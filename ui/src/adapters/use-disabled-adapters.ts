@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { adaptersApi } from "@/api/adapters";
 import { setDisabledAdapterTypes } from "@/adapters/disabled-store";
-import { isOverrideDisabled, subscribeToOverrides, getOverridesSnapshot } from "@/adapters/disabled-overrides-store";
 import { syncExternalAdapters } from "@/adapters/registry";
 import { queryKeys } from "@/lib/queryKeys";
 
@@ -24,10 +23,6 @@ export function useDisabledAdaptersSync(): Set<string> {
     staleTime: 5 * 60 * 1000,
   });
 
-  // Subscribe to the client-side override store so that
-  // syncExternalAdapters() re-runs when overrides are toggled.
-  useSyncExternalStore(subscribeToOverrides, getOverridesSnapshot);
-
   // Eagerly register external adapter types in the UI registry so that
   // consumers calling listUIAdapters() in the same render cycle see them.
   // This is idempotent — already-registered types are skipped.
@@ -39,7 +34,7 @@ export function useDisabledAdaptersSync(): Set<string> {
           type: a.type,
           label: a.label,
           disabled: a.disabled,
-          overrideDisabled: a.overriddenBuiltin ? isOverrideDisabled(a.type) : undefined,
+          overrideDisabled: a.overridePaused,
         })),
     );
   }
