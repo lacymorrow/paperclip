@@ -22,6 +22,7 @@ import {
   resolveRuntimeBind,
   validateConfiguredBindMode,
 } from "@paperclipai/shared";
+import { parseAttributionEnvFlag } from "@paperclipai/adapter-utils/server-utils";
 import {
   resolveDefaultBackupDir,
   resolveDefaultEmbeddedPostgresDir,
@@ -271,12 +272,12 @@ export function loadConfig(): Config {
   const attributionCommitFromEnv = process.env.PAPERCLIP_ATTRIBUTION_COMMIT;
   const attributionCommit =
     attributionCommitFromEnv !== undefined
-      ? attributionCommitFromEnv.toLowerCase() !== "false"
+      ? parseAttributionEnvFlag(attributionCommitFromEnv)
       : (fileAttribution?.commit ?? true);
   const attributionPrFromEnv = process.env.PAPERCLIP_ATTRIBUTION_PR;
   const attributionPr =
     attributionPrFromEnv !== undefined
-      ? attributionPrFromEnv.toLowerCase() !== "false"
+      ? parseAttributionEnvFlag(attributionPrFromEnv)
       : (fileAttribution?.pr ?? true);
 
   const bindValidationErrors = validateConfiguredBindMode({

@@ -170,4 +170,30 @@ describe("materializePaperclipSkill", () => {
     const targetStat = await fs.lstat(target);
     expect(targetStat.isDirectory()).toBe(true);
   });
+
+  it("rebuilds when source has lost a file since the last materialization", async () => {
+    const source = await makeSourceSkill();
+    const target = path.join(workspace, "target");
+    const first = await materializePaperclipSkill(source, target, { commit: false, pr: true });
+    expect(first).toBe("created");
+
+    // Source loses the references/ subdirectory — target still has a stale symlink for it.
+    await fs.rm(path.join(source, "references"), { recursive: true, force: true });
+    expect(await fs.readdir(target)).toContain("references");
+
+    const second = await materializePaperclipSkill(source, target, { commit: false, pr: true });
+
+    expect(second).toBe("repaired");
+    expect(await fs.readdir(target)).not.toContain("references");
+  });
+
+  it("throws when target exists as a regular file and attribution is disabled", async () => {
+    const source = await makeSourceSkill();
+    const target = path.join(workspace, "target");
+    await fs.writeFile(target, "operator-placed content", "utf8");
+
+    await expect(
+      materializePaperclipSkill(source, target, { commit: false, pr: true }),
+    ).rejects.toThrow(/regular file/);
+  });
 });

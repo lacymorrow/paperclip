@@ -1402,7 +1402,7 @@ export interface PaperclipAttributionPreference {
 
 const PAPERCLIP_COMMIT_TRAILER_PATTERN = /Co-Authored-By:\s*Paperclip\s*<noreply@paperclip\.ing>/i;
 
-function parseAttributionEnvFlag(raw: string | undefined): boolean {
+export function parseAttributionEnvFlag(raw: string | undefined): boolean {
   if (typeof raw !== "string") return true;
   const normalized = raw.trim().toLowerCase();
   if (normalized.length === 0) return true;
@@ -1447,6 +1447,13 @@ async function isPaperclipSkillMaterializationCurrent(
 ): Promise<boolean> {
   const sourceEntries = await fs.readdir(source, { withFileTypes: true }).catch(() => null);
   if (!sourceEntries) return false;
+  const targetEntries = await fs.readdir(target, { withFileTypes: true }).catch(() => null);
+  if (!targetEntries) return false;
+
+  const sourceNames = new Set(sourceEntries.map((entry) => entry.name));
+  for (const targetEntry of targetEntries) {
+    if (!sourceNames.has(targetEntry.name)) return false;
+  }
 
   for (const entry of sourceEntries) {
     const targetEntryPath = path.join(target, entry.name);
@@ -1520,7 +1527,9 @@ export async function materializePaperclipSkill(
     await writeMaterializedPaperclipSkillDirectory(source, target, rewritten);
     return "repaired";
   }
-  return "skipped";
+  throw new Error(
+    `Cannot materialize Paperclip skill at ${target}: target exists as a regular file, refusing to overwrite. Move or delete it and retry.`,
+  );
 }
 
 export async function removeMaintainerOnlySkillSymlinks(
