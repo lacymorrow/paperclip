@@ -410,6 +410,20 @@ describe("MarkdownBody", () => {
     expect(preMatch![0]).not.toContain("<br");
   });
 
+  it("renders a copy button alongside fenced code blocks", () => {
+    const html = renderMarkdown("```ts\nconst a = 1;\n```");
+
+    expect(html).toContain("paperclip-markdown-codeblock");
+    expect(html).toContain("paperclip-markdown-codeblock-copy");
+    expect(html).toContain('aria-label="Copy code"');
+    expect(html).toContain("lucide-copy");
+  });
+
+  it("does not render a copy button on inline code", () => {
+    const html = renderMarkdown("Reference `inline-code` here.");
+
+    expect(html).not.toContain("paperclip-markdown-codeblock-copy");
+  });
   it("renders internal issue links and bare identifiers as inline issue refs", () => {
     const html = renderMarkdown(`See PAP-42 and [linked task](${buildIssueReferenceHref("PAP-77")}) for follow-up.`, [
       { identifier: "PAP-42", status: "done" },
