@@ -57,14 +57,14 @@ export function isLocalFilePath(pathname: string): boolean {
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length === 0) return false;
   const first = segments[0]!;
-  // Common filesystem roots (case-insensitive)
-  const fsRoots = /^(users|home|tmp|var|etc|opt|usr|mnt|volumes|private|applications|library|system|dev|proc|sys|run|boot|srv|media|root|snap|nix)$/i;
-  if (fsRoots.test(first)) return true;
   // Windows-style paths that got normalized (e.g. C:/Users/...)
   if (/^[a-zA-Z]:$/.test(first)) return true;
-  // Paths with file extensions in the last segment (e.g. /foo/bar/file.md)
-  const last = segments[segments.length - 1]!;
-  if (/\.[a-zA-Z0-9]{1,10}$/.test(last) && segments.length > 2) return true;
+  // Unambiguous filesystem roots (long names that won't clash with company prefixes)
+  const unambiguousRoots = /^(users|home|volumes|private|applications|library|system|proc|boot|media|snap|nix)$/i;
+  if (unambiguousRoots.test(first)) return true;
+  // Short filesystem roots that could be company prefixes — require 3+ segments to confirm
+  const ambiguousRoots = /^(tmp|var|etc|opt|usr|mnt|dev|sys|run|srv|root)$/i;
+  if (ambiguousRoots.test(first) && segments.length >= 3) return true;
   return false;
 }
 
