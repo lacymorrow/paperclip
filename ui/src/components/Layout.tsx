@@ -25,9 +25,11 @@ import { useCompany } from "../context/CompanyContext";
 import { useSidebar } from "../context/SidebarContext";
 import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
 import { useCompanyPageMemory } from "../hooks/useCompanyPageMemory";
+import { useDragSelectScroll } from "../hooks/useDragSelectScroll";
 import { healthApi } from "../api/health";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { shouldSyncCompanySelectionFromRoute } from "../lib/company-selection";
+import { isLocalFilePath } from "../lib/company-routes";
 import {
   DEFAULT_INSTANCE_SETTINGS_PATH,
   normalizeRememberedInstanceSettingsPath,
@@ -83,7 +85,7 @@ export function Layout() {
     return companies.find((company) => company.issuePrefix.toUpperCase() === requestedPrefix) ?? null;
   }, [companies, companyPrefix]);
   const hasUnknownCompanyPrefix =
-    Boolean(companyPrefix) && !companiesLoading && companies.length > 0 && !matchedCompany;
+    Boolean(companyPrefix) && !companiesLoading && companies.length > 0 && !matchedCompany && !isLocalFilePath(location.pathname);
   const { data: health } = useQuery({
     queryKey: queryKeys.health,
     queryFn: () => healthApi.get(),
@@ -160,6 +162,7 @@ export function Layout() {
   }, []);
 
   useCompanyPageMemory();
+  useDragSelectScroll(mainContentRef);
 
   useKeyboardShortcuts({
     enabled: keyboardShortcutsEnabled,

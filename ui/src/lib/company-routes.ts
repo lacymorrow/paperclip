@@ -53,11 +53,29 @@ export function isBoardPathWithoutPrefix(pathname: string): boolean {
   return BOARD_ROUTE_ROOTS.has(root.toLowerCase());
 }
 
+export function isLocalFilePath(pathname: string): boolean {
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 0) return false;
+  const first = segments[0]!;
+  // Common filesystem roots (case-insensitive)
+  const fsRoots = /^(users|home|tmp|var|etc|opt|usr|mnt|volumes|private|applications|library|system|dev|proc|sys|run|boot|srv|media|root|snap|nix)$/i;
+  if (fsRoots.test(first)) return true;
+  // Windows-style paths that got normalized (e.g. C:/Users/...)
+  if (/^[a-zA-Z]:$/.test(first)) return true;
+  // Paths with file extensions in the last segment (e.g. /foo/bar/file.md)
+  const last = segments[segments.length - 1]!;
+  if (/\.[a-zA-Z0-9]{1,10}$/.test(last) && segments.length > 2) return true;
+  return false;
+}
+
 export function extractCompanyPrefixFromPath(pathname: string): string | null {
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length === 0) return null;
   const first = segments[0]!.toLowerCase();
   if (GLOBAL_ROUTE_ROOTS.has(first) || BOARD_ROUTE_ROOTS.has(first)) {
+    return null;
+  }
+  if (isLocalFilePath(pathname)) {
     return null;
   }
   return normalizeCompanyPrefix(segments[0]!);

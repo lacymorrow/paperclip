@@ -3,6 +3,7 @@ import {
   applyCompanyPrefix,
   extractCompanyPrefixFromPath,
   isBoardPathWithoutPrefix,
+  isLocalFilePath,
   toCompanyRelativePath,
 } from "./company-routes";
 
@@ -19,5 +20,40 @@ describe("company routes", () => {
     expect(toCompanyRelativePath("/PAP/execution-workspaces/workspace-123")).toBe(
       "/execution-workspaces/workspace-123",
     );
+  });
+});
+
+describe("isLocalFilePath", () => {
+  it("detects unix filesystem paths", () => {
+    expect(isLocalFilePath("/Users/lmorrow/dev/code/docs/branch-and-commit-conventions.md")).toBe(true);
+    expect(isLocalFilePath("/home/user/projects/readme.txt")).toBe(true);
+    expect(isLocalFilePath("/tmp/output.log")).toBe(true);
+    expect(isLocalFilePath("/var/log/app.log")).toBe(true);
+    expect(isLocalFilePath("/etc/nginx/nginx.conf")).toBe(true);
+    expect(isLocalFilePath("/opt/app/config.yaml")).toBe(true);
+    expect(isLocalFilePath("/Volumes/External/file.txt")).toBe(true);
+  });
+
+  it("does not flag valid company prefix paths", () => {
+    expect(isLocalFilePath("/PAP/issues")).toBe(false);
+    expect(isLocalFilePath("/ACME/projects/123")).toBe(false);
+    expect(isLocalFilePath("/")).toBe(false);
+  });
+
+  it("detects deep paths with file extensions", () => {
+    expect(isLocalFilePath("/some/deep/nested/path/file.md")).toBe(true);
+  });
+});
+
+describe("extractCompanyPrefixFromPath rejects filesystem paths", () => {
+  it("returns null for local file paths", () => {
+    expect(extractCompanyPrefixFromPath("/Users/lmorrow/dev/code/docs/file.md")).toBeNull();
+    expect(extractCompanyPrefixFromPath("/home/user/project/README.md")).toBeNull();
+    expect(extractCompanyPrefixFromPath("/tmp/output.log")).toBeNull();
+  });
+
+  it("still extracts valid company prefixes", () => {
+    expect(extractCompanyPrefixFromPath("/PAP/issues")).toBe("PAP");
+    expect(extractCompanyPrefixFromPath("/acme/projects")).toBe("ACME");
   });
 });
