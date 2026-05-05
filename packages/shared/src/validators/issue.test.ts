@@ -75,4 +75,20 @@ describe("issue validators", () => {
     expect(response.summaryMarkdown).toBe("Summary\n\nNext action");
     expect(document.body).toBe("# Plan\n\nShip it");
   });
+
+  it("normalizes escaped fenced code blocks in comment bodies", () => {
+    const parsed = addIssueCommentSchema.parse({
+      body: "Found the bug:\\n\\n```ts\\nconst x = await db.query();\\n```\\n\\nFixed.",
+    });
+
+    expect(parsed.body).toBe("Found the bug:\n\n```ts\nconst x = await db.query();\n```\n\nFixed.");
+  });
+
+  it("preserves fenced code blocks with real line breaks", () => {
+    const parsed = addIssueCommentSchema.parse({
+      body: "Here is code:\n\n```js\nconst x = 1;\nconst y = 2;\n```\n\nDone.",
+    });
+
+    expect(parsed.body).toBe("Here is code:\n\n```js\nconst x = 1;\nconst y = 2;\n```\n\nDone.");
+  });
 });
