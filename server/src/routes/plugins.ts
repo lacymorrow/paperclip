@@ -2316,12 +2316,8 @@ export function pluginRoutes(
     const payload = (req.body as Record<string, unknown> | undefined) ?? {};
 
     // Slack url_verification: echo challenge back immediately, no delivery record needed
-    if (
-      parsedBody &&
-      (parsedBody as Record<string, unknown>).type === "url_verification" &&
-      (parsedBody as Record<string, unknown>).challenge
-    ) {
-      res.status(200).json({ challenge: (parsedBody as Record<string, unknown>).challenge });
+    if (payload.type === "url_verification" && payload.challenge) {
+      res.status(200).json({ challenge: payload.challenge });
       return;
     }
 
