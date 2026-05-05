@@ -1,7 +1,14 @@
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "@/lib/router";
-import { Check, ChevronDown, ChevronRight, Layers, MoreHorizontal, Plus, Repeat } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ExternalLink, Layers, Link2, MoreHorizontal, Play, Plus, Repeat } from "lucide-react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { routinesApi } from "../api/routines";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
@@ -207,85 +214,121 @@ function RoutineListRow({
   const isDraft = !isArchived && !routine.assigneeAgentId;
 
   return (
-    <Link
-      to={href}
-      className="group flex flex-col gap-3 border-b border-border px-3 py-3 transition-colors hover:bg-accent/50 last:border-b-0 sm:flex-row sm:items-center no-underline text-inherit"
-    >
-      <div className="min-w-0 flex-1 space-y-1.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate text-sm font-medium">{routine.title}</span>
-          {(isArchived || routine.status === "paused" || isDraft) ? (
-            <span className="text-xs text-muted-foreground">
-              {isArchived ? "archived" : isDraft ? "draft" : "paused"}
-            </span>
-          ) : null}
-        </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span className="flex items-center gap-2">
-            <span
-              className="h-2.5 w-2.5 shrink-0 rounded-sm"
-              style={{ backgroundColor: project?.color ?? "#64748b" }}
-            />
-            <span>{routine.projectId ? (project?.name ?? "Unknown project") : "No project"}</span>
-          </span>
-          <span className="flex items-center gap-2">
-            {agent?.icon ? <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0" /> : null}
-            <span>{routine.assigneeAgentId ? (agent?.name ?? "Unknown agent") : "No default agent"}</span>
-          </span>
-          <span>
-            {formatLastRunTimestamp(routine.lastRun?.triggeredAt)}
-            {routine.lastRun ? ` · ${formatRoutineRunStatus(routine.lastRun.status)}` : ""}
-          </span>
-        </div>
-      </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <Link
+          to={href}
+          className="group flex flex-col gap-3 border-b border-border px-3 py-3 transition-colors hover:bg-accent/50 last:border-b-0 sm:flex-row sm:items-center no-underline text-inherit"
+        >
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="truncate text-sm font-medium">{routine.title}</span>
+              {(isArchived || routine.status === "paused" || isDraft) ? (
+                <span className="text-xs text-muted-foreground">
+                  {isArchived ? "archived" : isDraft ? "draft" : "paused"}
+                </span>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span className="flex items-center gap-2">
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                  style={{ backgroundColor: project?.color ?? "#64748b" }}
+                />
+                <span>{routine.projectId ? (project?.name ?? "Unknown project") : "No project"}</span>
+              </span>
+              <span className="flex items-center gap-2">
+                {agent?.icon ? <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0" /> : null}
+                <span>{routine.assigneeAgentId ? (agent?.name ?? "Unknown agent") : "No default agent"}</span>
+              </span>
+              <span>
+                {formatLastRunTimestamp(routine.lastRun?.triggeredAt)}
+                {routine.lastRun ? ` · ${formatRoutineRunStatus(routine.lastRun.status)}` : ""}
+              </span>
+            </div>
+          </div>
 
-      <div className="flex items-center gap-3" onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}>
-        <div className="flex items-center gap-3">
-          <ToggleSwitch
-            size="lg"
-            checked={enabled}
-            onCheckedChange={() => onToggleEnabled(routine, enabled)}
-            disabled={isStatusPending || isArchived}
-            aria-label={enabled ? `Disable ${routine.title}` : `Enable ${routine.title}`}
-          />
-          <span className="w-12 text-xs text-muted-foreground">
-            {isArchived ? "Archived" : isDraft ? "Draft" : enabled ? "On" : "Off"}
-          </span>
-        </div>
+          <div className="flex items-center gap-3" onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}>
+            <div className="flex items-center gap-3">
+              <ToggleSwitch
+                size="lg"
+                checked={enabled}
+                onCheckedChange={() => onToggleEnabled(routine, enabled)}
+                disabled={isStatusPending || isArchived}
+                aria-label={enabled ? `Disable ${routine.title}` : `Enable ${routine.title}`}
+              />
+              <span className="w-12 text-xs text-muted-foreground">
+                {isArchived ? "Archived" : isDraft ? "Draft" : enabled ? "On" : "Off"}
+              </span>
+            </div>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${routine.title}`}>
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem asChild>
-              <Link to={href}>Edit</Link>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={runningRoutineId === routine.id || isArchived}
-              onClick={() => onRunNow(routine)}
-            >
-              {runningRoutineId === routine.id ? "Running..." : "Run now"}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onClick={() => onToggleEnabled(routine, enabled)}
-              disabled={isStatusPending || isArchived}
-            >
-              {enabled ? "Pause" : "Enable"}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => onToggleArchived(routine)}
-              disabled={isStatusPending}
-            >
-              {routine.status === "archived" ? "Restore" : "Archive"}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-    </Link>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${routine.title}`}>
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem asChild>
+                  <Link to={href}>Edit</Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={runningRoutineId === routine.id || isArchived}
+                  onClick={() => onRunNow(routine)}
+                >
+                  {runningRoutineId === routine.id ? "Running..." : "Run now"}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => onToggleEnabled(routine, enabled)}
+                  disabled={isStatusPending || isArchived}
+                >
+                  {enabled ? "Pause" : "Enable"}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => onToggleArchived(routine)}
+                  disabled={isStatusPending}
+                >
+                  {routine.status === "archived" ? "Restore" : "Archive"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </Link>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onClick={() => window.open(href, "_blank")}>
+          <ExternalLink className="h-4 w-4" />
+          Open in new tab
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${href}`)}>
+          <Link2 className="h-4 w-4" />
+          Copy link
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          disabled={runningRoutineId === routine.id || isArchived}
+          onClick={() => onRunNow(routine)}
+        >
+          <Play className="h-4 w-4" />
+          {runningRoutineId === routine.id ? "Running..." : "Run now"}
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={() => onToggleEnabled(routine, enabled)}
+          disabled={isStatusPending || isArchived}
+        >
+          {enabled ? "Pause" : "Enable"}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          onClick={() => onToggleArchived(routine)}
+          disabled={isStatusPending}
+          variant={routine.status === "archived" ? "default" : "destructive"}
+        >
+          {routine.status === "archived" ? "Restore" : "Archive"}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 

@@ -60,7 +60,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
-import { CircleDot, Plus, ArrowUpDown, Layers, Check, ChevronRight, List, ListTree, Columns3, User, Search, CircleSlash2 } from "lucide-react";
+import { CircleDot, Plus, ArrowUpDown, Layers, Check, ChevronRight, List, ListTree, Columns3, User, Search, CircleSlash2, ExternalLink, Link2, Flag } from "lucide-react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { KanbanBoard } from "./KanbanBoard";
 import { buildIssueTree, countDescendants } from "../lib/issue-tree";
 import { buildSubIssueDefaultsForViewer } from "../lib/subIssueDefaults";
@@ -1033,6 +1043,7 @@ export function IssuesList({
     setAssigneeSearch("");
   }, [onUpdateIssue]);
 
+
   let remainingRowsToRender = viewState.viewMode === "list" ? renderedIssueRowLimit : Number.POSITIVE_INFINITY;
 
   return (
@@ -1335,6 +1346,9 @@ export function IssuesList({
                     </>
                   ) : null;
 
+                  const issuePathId = issue.identifier ?? issue.id;
+                  const issueHref = createIssueDetailPath(issuePathId);
+
                   return (
                     <div
                       key={issue.id}
@@ -1348,6 +1362,9 @@ export function IssuesList({
                           : {}),
                       }}
                     >
+                    <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                    <div>
                       <IssueRow
                         issue={issue}
                         issueLinkState={issueLinkState}
@@ -1545,6 +1562,55 @@ export function IssuesList({
                           ) : undefined
                         )}
                       />
+                    </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem onClick={() => window.open(issueHref, "_blank")}>
+                        <ExternalLink className="h-4 w-4" />
+                        Open in new tab
+                      </ContextMenuItem>
+                      <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${issueHref}`)}>
+                        <Link2 className="h-4 w-4" />
+                        Copy link
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuSub>
+                        <ContextMenuSubTrigger>
+                          <StatusIcon status={issue.status} />
+                          Set status
+                        </ContextMenuSubTrigger>
+                        <ContextMenuSubContent>
+                          {ISSUE_STATUSES.map((s) => (
+                            <ContextMenuItem
+                              key={s}
+                              onClick={() => onUpdateIssue(issue.id, { status: s })}
+                              className={cn(s === issue.status && "bg-accent")}
+                            >
+                              <StatusIcon status={s} />
+                              {issueStatusLabels[s]}
+                            </ContextMenuItem>
+                          ))}
+                        </ContextMenuSubContent>
+                      </ContextMenuSub>
+                      <ContextMenuSub>
+                        <ContextMenuSubTrigger>
+                          <Flag className="h-4 w-4" />
+                          Set priority
+                        </ContextMenuSubTrigger>
+                        <ContextMenuSubContent>
+                          {(["critical", "high", "medium", "low"] as const).map((p) => (
+                            <ContextMenuItem
+                              key={p}
+                              onClick={() => onUpdateIssue(issue.id, { priority: p })}
+                              className={cn("capitalize", p === issue.priority ? "bg-accent" : "")}
+                            >
+                              {p}
+                            </ContextMenuItem>
+                          ))}
+                        </ContextMenuSubContent>
+                      </ContextMenuSub>
+                    </ContextMenuContent>
+                    </ContextMenu>
                       {hasChildren && isExpanded && children.map((child) => renderIssueRow(child, depth + 1))}
                     </div>
                   );
