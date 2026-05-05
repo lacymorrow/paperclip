@@ -1584,7 +1584,7 @@ export function IssuesList({
                             <ContextMenuItem
                               key={s}
                               onClick={() => onUpdateIssue(issue.id, { status: s })}
-                              className={s === issue.status ? "bg-accent" : ""}
+                              className={cn(s === issue.status && "bg-accent")}
                             >
                               <StatusIcon status={s} />
                               {issueStatusLabels[s]}
