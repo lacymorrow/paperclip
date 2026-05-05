@@ -17,7 +17,14 @@ import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Bot, Plus, List, GitBranch, SlidersHorizontal } from "lucide-react";
+import { Bot, Plus, List, GitBranch, SlidersHorizontal, ExternalLink, Link2 } from "lucide-react";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
 
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
@@ -218,54 +225,70 @@ export function Agents() {
       {effectiveView === "list" && filtered.length > 0 && (
         <div className="border border-border">
           {filtered.map((agent) => {
+            const agentHref = agentUrl(agent);
             return (
-              <EntityRow
-                key={agent.id}
-                title={agent.name}
-                subtitle={`${roleLabels[agent.role] ?? agent.role}${agent.title ? ` - ${agent.title}` : ""}`}
-                to={agentUrl(agent)}
-                className={agent.pausedAt && tab !== "paused" ? "opacity-50" : ""}
-                leading={
-                  <span className="relative flex h-2.5 w-2.5">
-                    <span
-                      className={`absolute inline-flex h-full w-full rounded-full ${agentStatusDot[agent.status] ?? agentStatusDotDefault}`}
+              <ContextMenu key={agent.id}>
+                <ContextMenuTrigger asChild>
+                  <div>
+                    <EntityRow
+                      title={agent.name}
+                      subtitle={`${roleLabels[agent.role] ?? agent.role}${agent.title ? ` - ${agent.title}` : ""}`}
+                      to={agentHref}
+                      className={agent.pausedAt && tab !== "paused" ? "opacity-50" : ""}
+                      leading={
+                        <span className="relative flex h-2.5 w-2.5">
+                          <span
+                            className={`absolute inline-flex h-full w-full rounded-full ${agentStatusDot[agent.status] ?? agentStatusDotDefault}`}
+                          />
+                        </span>
+                      }
+                      trailing={
+                        <div className="flex items-center gap-3">
+                          <span className="sm:hidden">
+                            {liveRunByAgent.has(agent.id) ? (
+                              <LiveRunIndicator
+                                agentRef={agentRouteRef(agent)}
+                                runId={liveRunByAgent.get(agent.id)!.runId}
+                                liveCount={liveRunByAgent.get(agent.id)!.liveCount}
+                              />
+                            ) : (
+                              <StatusBadge status={agent.status} />
+                            )}
+                          </span>
+                          <div className="hidden sm:flex items-center gap-3">
+                            {liveRunByAgent.has(agent.id) && (
+                              <LiveRunIndicator
+                                agentRef={agentRouteRef(agent)}
+                                runId={liveRunByAgent.get(agent.id)!.runId}
+                                liveCount={liveRunByAgent.get(agent.id)!.liveCount}
+                              />
+                            )}
+                            <span className="w-28 whitespace-nowrap text-right font-mono text-xs text-muted-foreground">
+                              {getAdapterLabel(agent.adapterType)}
+                            </span>
+                            <span className="text-xs text-muted-foreground w-16 text-right">
+                              {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
+                            </span>
+                            <span className="w-20 flex justify-end">
+                              <StatusBadge status={agent.status} />
+                            </span>
+                          </div>
+                        </div>
+                      }
                     />
-                  </span>
-                }
-                trailing={
-                  <div className="flex items-center gap-3">
-                    <span className="sm:hidden">
-                      {liveRunByAgent.has(agent.id) ? (
-                        <LiveRunIndicator
-                          agentRef={agentRouteRef(agent)}
-                          runId={liveRunByAgent.get(agent.id)!.runId}
-                          liveCount={liveRunByAgent.get(agent.id)!.liveCount}
-                        />
-                      ) : (
-                        <StatusBadge status={agent.status} />
-                      )}
-                    </span>
-                    <div className="hidden sm:flex items-center gap-3">
-                      {liveRunByAgent.has(agent.id) && (
-                        <LiveRunIndicator
-                          agentRef={agentRouteRef(agent)}
-                          runId={liveRunByAgent.get(agent.id)!.runId}
-                          liveCount={liveRunByAgent.get(agent.id)!.liveCount}
-                        />
-                      )}
-                      <span className="w-28 whitespace-nowrap text-right font-mono text-xs text-muted-foreground">
-                        {getAdapterLabel(agent.adapterType)}
-                      </span>
-                      <span className="text-xs text-muted-foreground w-16 text-right">
-                        {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
-                      </span>
-                      <span className="w-20 flex justify-end">
-                        <StatusBadge status={agent.status} />
-                      </span>
-                    </div>
                   </div>
-                }
-              />
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem onClick={() => window.open(agentHref, "_blank")}>
+                    <ExternalLink className="h-4 w-4" />
+                    Open in new tab
+                  </ContextMenuItem>
+                  <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${agentHref}`)}>
+                    <Link2 className="h-4 w-4" />
+                    Copy link
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             );
           })}
         </div>
@@ -318,58 +341,74 @@ function OrgTreeNode({
 
   const statusColor = agentStatusDot[node.status] ?? agentStatusDotDefault;
 
+  const nodeHref = agent ? agentUrl(agent) : `/agents/${node.id}`;
+
   return (
     <div style={{ paddingLeft: depth * 24 }}>
-      <Link
-        to={agent ? agentUrl(agent) : `/agents/${node.id}`}
-        className={cn("flex items-center gap-3 px-3 py-2 hover:bg-accent/30 transition-colors w-full text-left no-underline text-inherit", agent?.pausedAt && tab !== "paused" && "opacity-50")}
-      >
-        <span className="relative flex h-2.5 w-2.5 shrink-0">
-          <span className={`absolute inline-flex h-full w-full rounded-full ${statusColor}`} />
-        </span>
-        <div className="flex-1 min-w-0">
-          <span className="text-sm font-medium">{node.name}</span>
-          <span className="text-xs text-muted-foreground ml-2">
-            {roleLabels[node.role] ?? node.role}
-            {agent?.title ? ` - ${agent.title}` : ""}
-          </span>
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <span className="sm:hidden">
-            {liveRunByAgent.has(node.id) ? (
-              <LiveRunIndicator
-                agentRef={agent ? agentRouteRef(agent) : node.id}
-                runId={liveRunByAgent.get(node.id)!.runId}
-                liveCount={liveRunByAgent.get(node.id)!.liveCount}
-              />
-            ) : (
-              <StatusBadge status={node.status} />
-            )}
-          </span>
-          <div className="hidden sm:flex items-center gap-3">
-            {liveRunByAgent.has(node.id) && (
-              <LiveRunIndicator
-                agentRef={agent ? agentRouteRef(agent) : node.id}
-                runId={liveRunByAgent.get(node.id)!.runId}
-                liveCount={liveRunByAgent.get(node.id)!.liveCount}
-              />
-            )}
-            {agent && (
-              <>
-                <span className="w-28 whitespace-nowrap text-right font-mono text-xs text-muted-foreground">
-                  {getAdapterLabel(agent.adapterType)}
-                </span>
-                <span className="text-xs text-muted-foreground w-16 text-right">
-                  {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
-                </span>
-              </>
-            )}
-            <span className="w-20 flex justify-end">
-              <StatusBadge status={node.status} />
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <Link
+            to={nodeHref}
+            className={cn("flex items-center gap-3 px-3 py-2 hover:bg-accent/30 transition-colors w-full text-left no-underline text-inherit", agent?.pausedAt && tab !== "paused" && "opacity-50")}
+          >
+            <span className="relative flex h-2.5 w-2.5 shrink-0">
+              <span className={`absolute inline-flex h-full w-full rounded-full ${statusColor}`} />
             </span>
-          </div>
-        </div>
-      </Link>
+            <div className="flex-1 min-w-0">
+              <span className="text-sm font-medium">{node.name}</span>
+              <span className="text-xs text-muted-foreground ml-2">
+                {roleLabels[node.role] ?? node.role}
+                {agent?.title ? ` - ${agent.title}` : ""}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <span className="sm:hidden">
+                {liveRunByAgent.has(node.id) ? (
+                  <LiveRunIndicator
+                    agentRef={agent ? agentRouteRef(agent) : node.id}
+                    runId={liveRunByAgent.get(node.id)!.runId}
+                    liveCount={liveRunByAgent.get(node.id)!.liveCount}
+                  />
+                ) : (
+                  <StatusBadge status={node.status} />
+                )}
+              </span>
+              <div className="hidden sm:flex items-center gap-3">
+                {liveRunByAgent.has(node.id) && (
+                  <LiveRunIndicator
+                    agentRef={agent ? agentRouteRef(agent) : node.id}
+                    runId={liveRunByAgent.get(node.id)!.runId}
+                    liveCount={liveRunByAgent.get(node.id)!.liveCount}
+                  />
+                )}
+                {agent && (
+                  <>
+                    <span className="w-28 whitespace-nowrap text-right font-mono text-xs text-muted-foreground">
+                      {getAdapterLabel(agent.adapterType)}
+                    </span>
+                    <span className="text-xs text-muted-foreground w-16 text-right">
+                      {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
+                    </span>
+                  </>
+                )}
+                <span className="w-20 flex justify-end">
+                  <StatusBadge status={node.status} />
+                </span>
+              </div>
+            </div>
+          </Link>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onClick={() => window.open(nodeHref, "_blank")}>
+            <ExternalLink className="h-4 w-4" />
+            Open in new tab
+          </ContextMenuItem>
+          <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${nodeHref}`)}>
+            <Link2 className="h-4 w-4" />
+            Copy link
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {node.reports && node.reports.length > 0 && (
         <div className="border-l border-border/50 ml-4">
           {node.reports.map((child) => (
