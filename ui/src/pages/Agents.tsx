@@ -279,11 +279,11 @@ export function Agents() {
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent>
-                  <ContextMenuItem onClick={() => window.open(agentHref, "_blank")}>
+                  <ContextMenuItem onClick={() => window.open(agentHref, "_blank", "noopener,noreferrer")}>
                     <ExternalLink className="h-4 w-4" />
                     Open in new tab
                   </ContextMenuItem>
-                  <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${agentHref}`)}>
+                  <ContextMenuItem onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${agentHref}`).catch(() => {}); }}>
                     <Link2 className="h-4 w-4" />
                     Copy link
                   </ContextMenuItem>
@@ -399,11 +399,11 @@ function OrgTreeNode({
           </Link>
         </ContextMenuTrigger>
         <ContextMenuContent>
-          <ContextMenuItem onClick={() => window.open(nodeHref, "_blank")}>
+          <ContextMenuItem onClick={() => window.open(nodeHref, "_blank", "noopener,noreferrer")}>
             <ExternalLink className="h-4 w-4" />
             Open in new tab
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${nodeHref}`)}>
+          <ContextMenuItem onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${nodeHref}`).catch(() => {}); }}>
             <Link2 className="h-4 w-4" />
             Copy link
           </ContextMenuItem>

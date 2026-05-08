@@ -297,11 +297,11 @@ function RoutineListRow({
         </Link>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onClick={() => window.open(href, "_blank")}>
+        <ContextMenuItem onClick={() => window.open(href, "_blank", "noopener,noreferrer")}>
           <ExternalLink className="h-4 w-4" />
           Open in new tab
         </ContextMenuItem>
-        <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${href}`)}>
+        <ContextMenuItem onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${href}`).catch(() => {}); }}>
           <Link2 className="h-4 w-4" />
           Copy link
         </ContextMenuItem>

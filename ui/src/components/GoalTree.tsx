@@ -84,11 +84,11 @@ function GoalNode({ goal, children, allGoals, depth, goalLink, onSelect }: GoalN
           )}
         </ContextMenuTrigger>
         <ContextMenuContent>
-          <ContextMenuItem onClick={() => window.open(goalHref, "_blank")}>
+          <ContextMenuItem onClick={() => window.open(goalHref, "_blank", "noopener,noreferrer")}>
             <ExternalLink className="h-4 w-4" />
             Open in new tab
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => navigator.clipboard.writeText(`${window.location.origin}${goalHref}`)}>
+          <ContextMenuItem onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${goalHref}`).catch(() => {}); }}>
             <Link2 className="h-4 w-4" />
             Copy link
           </ContextMenuItem>
