@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Agent } from "@paperclipai/shared";
-import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, GitBranch, ListChecks, Loader2, MessageSquareQuote, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, ListChecks, Loader2, MessageSquareQuote, XCircle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import {
@@ -22,6 +22,7 @@ import { cn, formatDateTime, formatShortDate } from "../lib/utils";
 import { MarkdownBody } from "./MarkdownBody";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible";
 import { PriorityIcon } from "./PriorityIcon";
 import { Textarea } from "./ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -1036,6 +1037,7 @@ function RequestConfirmationCard({
     reason?: string,
   ) => Promise<void> | void;
 }) {
+  const [planOpen, setPlanOpen] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [working, setWorking] = useState<"accept" | "reject" | null>(null);
   const [rejectReason, setRejectReason] = useState(interaction.result?.reason ?? "");
@@ -1107,6 +1109,35 @@ function RequestConfirmationCard({
             target={interaction.payload.target}
           />
         </div>
+      ) : (interaction.payload.prompt || interaction.payload.detailsMarkdown) ? (
+        <Collapsible open={planOpen} onOpenChange={setPlanOpen}>
+          <CollapsibleTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-full justify-between px-2 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <span>{planOpen ? "Hide details" : "Show details"}</span>
+              <ChevronDown className={cn("h-3.5 w-3.5 transition-transform duration-200", planOpen && "rotate-180")} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="mt-1 space-y-3 rounded-sm border border-border/70 bg-background/75 p-4">
+              <div className="text-sm leading-6 text-foreground">
+                {interaction.payload.prompt}
+              </div>
+              {interaction.payload.detailsMarkdown ? (
+                <div className="border-t border-border/60 pt-3 text-sm">
+                  <MarkdownBody>{interaction.payload.detailsMarkdown}</MarkdownBody>
+                </div>
+              ) : null}
+              <RequestConfirmationTargetChip
+                interaction={interaction}
+                target={interaction.payload.target}
+              />
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
       ) : null}
 
       {interaction.status === "pending" ? (
