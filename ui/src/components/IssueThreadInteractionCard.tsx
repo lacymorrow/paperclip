@@ -1109,7 +1109,7 @@ function RequestConfirmationCard({
             target={interaction.payload.target}
           />
         </div>
-      ) : (interaction.payload.prompt || interaction.payload.detailsMarkdown) ? (
+      ) : (interaction.payload.prompt || interaction.payload.detailsMarkdown || interaction.payload.target) ? (
         <Collapsible open={planOpen} onOpenChange={setPlanOpen}>
           <CollapsibleTrigger asChild>
             <Button
