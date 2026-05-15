@@ -24,6 +24,23 @@
 
 <br/>
 
+## Why This Fork?
+
+This is a maintained fork of [paperclipai/paperclip](https://github.com/paperclipai/paperclip). We forked to extend Paperclip with features we need for our own agent operations that haven't landed upstream yet:
+
+- **Deep linking to Paperclip Hub** — install plugins and company templates via URL (`/install?plugin=...`)
+- **Channels** — external messaging schema and API for agent-to-agent and agent-to-human communication outside the issue thread
+- **Date-based triggers** — richer scheduling primitives beyond simple cron (deadline-aware wakeups, date-gated routines)
+- **Kubernetes adapter & sandbox execution** — run agent workloads in isolated k8s pods with resource limits and network policies
+- **Cost & billing control plane** — per-provider quota windows, spend dashboards, and budget hard-stops
+- **i18n foundation** — internationalization wrapper for the UI
+- **Document locking** — prevent concurrent edits on issue documents
+- **Workspace runtime improvements** — worktree-aware execution, minimal clone seeding, project-first workspace policies
+
+We keep the fork in sync with upstream (`git fetch upstream && git merge upstream/master`) and contribute fixes back where appropriate.
+
+<br/>
+
 ## What is Paperclip?
 
 # Open-source orchestration for zero-human companies
@@ -300,7 +317,7 @@ If you already have Paperclip configured, rerunning `onboard` keeps the existing
 Or manually:
 
 ```bash
-git clone https://github.com/paperclipai/paperclip.git
+git clone https://github.com/lacymorrow/paperclip.git
 cd paperclip
 pnpm install
 pnpm dev
