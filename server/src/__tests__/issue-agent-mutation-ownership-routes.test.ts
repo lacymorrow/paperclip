@@ -835,6 +835,19 @@ describe("agent issue mutation checkout ownership", () => {
     expect(res.status).toBe(403);
   });
 
+  it("rejects sibling handoff on non-comment POST routes (e.g. release)", async () => {
+    mockIssueService.getById.mockResolvedValue(
+      makeIssue({ status: "backlog", assigneeAgentId: ownerAgentId, parentId: parentIssueId }),
+    );
+    mockIssueService.count.mockResolvedValue(1);
+
+    const res = await request(await createApp(peerActor()))
+      .post(`/api/issues/${issueId}/release`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Agent cannot mutate another agent's issue");
+  });
+
   it("allows same-company agent mutations on unassigned in-progress issues", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: null }));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({

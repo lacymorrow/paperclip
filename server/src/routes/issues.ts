@@ -1327,7 +1327,9 @@ export function issueRoutes(
         (k) => body[k] !== undefined && k !== "status" && k !== "comment",
       );
       if (mutationKeys.length > 0) return false;
-    } else if (req.method !== "POST") {
+    } else if (req.method === "POST" && req.path.endsWith("/comments")) {
+      // allow sibling to post a comment
+    } else {
       return false;
     }
 
