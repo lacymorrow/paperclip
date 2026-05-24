@@ -23,8 +23,10 @@ import {
   buildPluginInstallRequest,
   buildPluginInitNextCommands,
   buildPluginInitScaffoldOptions,
+  getAlreadyInstalledInfo,
   registerPluginCommands,
 } from "../commands/client/plugin.js";
+import { ApiRequestError } from "../client/http.js";
 
 const tempDirs: string[] = [];
 
@@ -159,6 +161,43 @@ describe("plugin install", () => {
       packageName: "@acme/plugin-linear",
       version: "1.2.3",
       isLocalPath: false,
+    });
+  });
+});
+
+describe("getAlreadyInstalledInfo", () => {
+  it("returns null for non-API errors", () => {
+    expect(getAlreadyInstalledInfo(new Error("boom"))).toBeNull();
+  });
+
+  it("returns null for unrelated API errors", () => {
+    const error = new ApiRequestError(500, "Internal", undefined, { error: "Internal" });
+    expect(getAlreadyInstalledInfo(error)).toBeNull();
+  });
+
+  it("extracts plugin info from a structured 409 response", () => {
+    const body = {
+      error: "Plugin already installed: @acme/plugin-linear",
+      code: "already_installed",
+      pluginId: "11111111-1111-1111-1111-111111111111",
+      pluginKey: "@acme/plugin-linear",
+      currentVersion: "1.2.3",
+    };
+    const error = new ApiRequestError(409, body.error, undefined, body);
+    expect(getAlreadyInstalledInfo(error)).toEqual({
+      pluginId: body.pluginId,
+      pluginKey: body.pluginKey,
+      currentVersion: body.currentVersion,
+    });
+  });
+
+  it("falls back to message matching for legacy 400 already-installed responses", () => {
+    const body = { error: "Plugin already installed: @acme/plugin-linear" };
+    const error = new ApiRequestError(400, body.error, undefined, body);
+    expect(getAlreadyInstalledInfo(error)).toEqual({
+      pluginId: undefined,
+      pluginKey: undefined,
+      currentVersion: undefined,
     });
   });
 });
