@@ -148,6 +148,11 @@ export const queryKeys = {
   },
   cloudUpstreams: (companyId: string) => ["cloud-upstreams", companyId] as const,
   health: ["health"] as const,
+  channels: {
+    list: (companyId: string) => ["channels", companyId] as const,
+    routes: (companyId: string, channelId?: string) =>
+      ["channels", "routes", companyId, channelId ?? null] as const,
+  },
   secrets: {
     list: (companyId: string) => ["secrets", companyId] as const,
     providers: (companyId: string) => ["secret-providers", companyId] as const,
