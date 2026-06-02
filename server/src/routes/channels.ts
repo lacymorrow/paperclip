@@ -8,10 +8,18 @@ import {
   updateChannelSchema,
   updateChannelRouteSchema,
 } from "@paperclipai/shared";
+import { z } from "zod";
 import { validate } from "../middleware/validate.js";
 import { channelService, isSensitiveConfigKey } from "../services/channels.js";
+import { channelSenderService } from "../services/channel-sender.js";
 import { logActivity } from "../services/activity-log.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
+
+const testChannelSchema = z
+  .object({
+    content: z.string().trim().min(1).max(2000).optional(),
+  })
+  .partial();
 
 function summarizeConfigKeys(config: unknown): { keys: string[]; sensitiveKeys: string[] } {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
@@ -27,6 +35,7 @@ function summarizeConfigKeys(config: unknown): { keys: string[]; sensitiveKeys: 
 export function channelRoutes(db: Db) {
   const router = Router();
   const svc = channelService(db);
+  const sender = channelSenderService(db);
 
   // Channels CRUD
   router.get("/companies/:companyId/channels", async (req, res) => {
@@ -121,6 +130,41 @@ export function channelRoutes(db: Db) {
     });
     res.status(204).send();
   });
+
+  // Test send — used to verify the channel is configured correctly
+  router.post(
+    "/companies/:companyId/channels/:id/test",
+    validate(testChannelSchema),
+    async (req, res) => {
+      const { companyId, id } = req.params as { companyId: string; id: string };
+      assertCompanyAccess(req, companyId);
+      const actor = getActorInfo(req);
+      const result = await sender.sendTestMessage(companyId, id, {
+        content: req.body?.content,
+        agentId: actor.agentId,
+      });
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "channel.tested",
+        entityType: "channel",
+        entityId: id,
+        details: {
+          status: result.message.status,
+          attempts: result.attempts,
+          error: result.lastError,
+        },
+      });
+      const status = result.message.status === "delivered" ? 200 : 502;
+      res.status(status).json({
+        message: result.message,
+        attempts: result.attempts,
+        error: result.lastError,
+      });
+    },
+  );
 
   // Routes CRUD
   router.get("/companies/:companyId/routes", async (req, res) => {
