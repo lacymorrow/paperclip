@@ -147,6 +147,19 @@ describe("channel routes", () => {
     expect(mockChannelService.deleteChannel).not.toHaveBeenCalled();
   });
 
+  it("rejects non-UUID channelId on GET /routes (400)", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "u",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+    const res = await request(app).get(`/api/companies/${companyId}/routes?channelId=not-a-uuid`);
+    expect(res.status).toBe(400);
+    expect(mockChannelService.listRoutes).not.toHaveBeenCalled();
+  });
+
   it("rejects empty PATCH bodies at the validator (422)", async () => {
     const app = await createApp({
       type: "board",

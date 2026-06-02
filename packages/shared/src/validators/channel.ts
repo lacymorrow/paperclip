@@ -57,6 +57,11 @@ export const listChannelMessagesQuerySchema = z.object({
 });
 export type ListChannelMessagesQuery = z.infer<typeof listChannelMessagesQuerySchema>;
 
+export const listChannelRoutesQuerySchema = z.object({
+  channelId: z.string().uuid().optional(),
+});
+export type ListChannelRoutesQuery = z.infer<typeof listChannelRoutesQuerySchema>;
+
 export interface Channel {
   id: string;
   companyId: string;

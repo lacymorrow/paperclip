@@ -4,6 +4,7 @@ import {
   createChannelSchema,
   createChannelRouteSchema,
   listChannelMessagesQuerySchema,
+  listChannelRoutesQuerySchema,
   updateChannelSchema,
   updateChannelRouteSchema,
 } from "@paperclipai/shared";
@@ -125,8 +126,12 @@ export function channelRoutes(db: Db) {
   router.get("/companies/:companyId/routes", async (req, res) => {
     const { companyId } = req.params as { companyId: string };
     assertCompanyAccess(req, companyId);
-    const channelId = typeof req.query.channelId === "string" ? req.query.channelId : undefined;
-    const result = await svc.listRoutes(companyId, channelId);
+    const parseResult = listChannelRoutesQuerySchema.safeParse(req.query);
+    if (!parseResult.success) {
+      res.status(400).json({ error: "Invalid query parameters", details: parseResult.error.flatten() });
+      return;
+    }
+    const result = await svc.listRoutes(companyId, parseResult.data.channelId);
     res.json(result);
   });
 
