@@ -13,7 +13,7 @@
  * than hand-lowercased company links.
  */
 const LOCAL_FILE_PATH_ROOT_PATTERN =
-  /^\/(?:Users|home|private|root|workspace|tmp|var|etc|usr|opt|mnt|srv|Volumes)(?:\/|$)/;
+  /^\/(?:Users|home|private|root|workspace|tmp|var|etc|usr|opt|mnt|srv|media|Volumes)(?:\/|$)/;
 
 const WINDOWS_DRIVE_PATTERN = /^[a-z]:[\\/]/i;
 

@@ -20,6 +20,7 @@ describe("isLocalFileHref", () => {
     expect(isLocalFileHref("/opt/tools/run.sh")).toBe(true);
     expect(isLocalFileHref("/mnt/data/dump.sql")).toBe(true);
     expect(isLocalFileHref("/srv/www/index.html")).toBe(true);
+    expect(isLocalFileHref("/media/usb/photo.jpg")).toBe(true);
     expect(isLocalFileHref("/Volumes/External/backup.zip")).toBe(true);
   });
 
