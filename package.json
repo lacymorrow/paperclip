@@ -89,9 +89,7 @@
       "@lexical/react": "0.46.0",
       "@lexical/rich-text": "0.46.0",
       "@lexical/selection": "0.46.0",
-      "@lexical/utils": "0.46.0",
-      "@assistant-ui/store": "0.2.13",
-      "@assistant-ui/tap": "0.5.14"
+      "@lexical/utils": "0.46.0"
     }
   }
 }
