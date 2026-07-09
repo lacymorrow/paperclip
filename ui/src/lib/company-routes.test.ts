@@ -28,6 +28,13 @@ describe("company routes", () => {
     );
   });
 
+  it("treats /live as a board route instead of a company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/live")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/live")).toBeNull();
+    expect(applyCompanyPrefix("/live", "PAP")).toBe("/PAP/live");
+    expect(toCompanyRelativePath("/PAP/live")).toBe("/live");
+  });
+
   it("treats /search as a board route that needs a company prefix", () => {
     expect(isBoardPathWithoutPrefix("/search")).toBe(true);
     expect(extractCompanyPrefixFromPath("/search")).toBeNull();
