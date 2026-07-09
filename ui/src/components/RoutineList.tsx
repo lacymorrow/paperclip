@@ -70,6 +70,7 @@ export function RoutineListRow<TRoutine extends RoutineListRowItem>({
   disableRunNow = false,
   disableToggle = false,
   hideArchiveAction = false,
+  divider = true,
   onRunNow,
   onToggleEnabled,
   onToggleArchived,
@@ -87,6 +88,8 @@ export function RoutineListRow<TRoutine extends RoutineListRowItem>({
   disableRunNow?: boolean;
   disableToggle?: boolean;
   hideArchiveAction?: boolean;
+  /** Render a bottom divider between consecutive rows. Off when the group is its own card. */
+  divider?: boolean;
   onRunNow: (routine: TRoutine) => void;
   onToggleEnabled: (routine: TRoutine, enabled: boolean) => void;
   onToggleArchived?: (routine: TRoutine) => void;
@@ -104,7 +107,9 @@ export function RoutineListRow<TRoutine extends RoutineListRowItem>({
       <ContextMenuTrigger asChild>
         <Link
           to={href}
-          className="group flex flex-col gap-3 border-b border-border px-3 py-3 transition-colors hover:bg-accent/50 last:border-b-0 sm:flex-row sm:items-center no-underline text-inherit"
+          className={`group flex flex-col gap-3 px-3 py-3 transition-colors hover:bg-accent/50 sm:flex-row sm:items-center no-underline text-inherit${
+            divider ? " border-b border-border last:border-b-0" : ""
+          }`}
         >
           <div className="min-w-0 flex-1 space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
@@ -122,7 +127,7 @@ export function RoutineListRow<TRoutine extends RoutineListRowItem>({
               <span className="flex items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-sm"
-                  style={{ backgroundColor: project?.color ?? "#64748b" }}
+                  style={{ backgroundColor: project?.color ?? "var(--project-none)" }}
                 />
                 <span>{routine.projectId ? (project?.name ?? "Unknown project") : "No project"}</span>
               </span>
