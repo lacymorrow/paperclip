@@ -1739,19 +1739,18 @@ export function IssuesList({
                   return (
                     <div
                       key={issue.id}
-                      style={{
-                        ...(depth > 0 ? { paddingLeft: `${depth * 16}px` } : {}),
-                        ...(useDeferredRowRendering
-                          ? {
-                            contentVisibility: "auto",
-                            containIntrinsicSize: "44px",
-                          }
-                          : {}),
-                      }}
+                      style={depth > 0 ? { paddingLeft: `${depth * 16}px` } : undefined}
                     >
                       <ContextMenu>
                         <ContextMenuTrigger asChild>
-                          <div>
+                          <div
+                            style={useDeferredRowRendering
+                              ? {
+                                contentVisibility: "auto",
+                                containIntrinsicSize: "44px",
+                              }
+                              : undefined}
+                          >
                             <IssueRow
                               issue={issue}
                               issueLinkState={issueLinkState}
