@@ -23,7 +23,7 @@ import { useDialogActions } from "../context/DialogContext";
 import { usePanel } from "../context/PanelContext";
 import { useSidebar } from "../context/SidebarContext";
 import { useToastActions } from "../context/ToastContext";
-import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useBreadcrumbs, type Breadcrumb } from "../context/BreadcrumbContext";
 import { assigneeValueFromSelection, formatAssigneeUserLabel, formatUserLabel, suggestedCommentAssigneeValue } from "../lib/assignees";
 import { buildCompanyUserInlineOptions, buildCompanyUserLabelMap, buildCompanyUserProfileMap, buildMarkdownMentionOptions, isAgentTaskTarget } from "../lib/company-members";
 import { extractIssueTimelineEvents } from "../lib/issue-timeline-events";
@@ -74,7 +74,7 @@ import {
 } from "../lib/optimistic-issue-comments";
 import { clearIssueExecutionRun, removeLiveRunById, upsertInterruptedRun } from "../lib/optimistic-issue-runs";
 import { useProjectOrder } from "../hooks/useProjectOrder";
-import { relativeTime, cn, formatDurationMs, formatTokens, visibleRunCostUsd } from "../lib/utils";
+import { relativeTime, cn, formatDurationMs, formatTokens, projectUrl, visibleRunCostUsd } from "../lib/utils";
 import { liveBlueBadge } from "../lib/status-colors";
 import { ApprovalCard } from "../components/ApprovalCard";
 import { InlineEditor } from "../components/InlineEditor";
@@ -3097,19 +3097,22 @@ export function IssueDetail() {
   });
 
   useEffect(() => {
-    setBreadcrumbs([
-      sourceBreadcrumb,
-      {
-        // The status glyph (leading) already conveys in-progress/live state;
-        // no redundant 🔵 emoji prefix on the title.
-        label: breadcrumbTitle,
-        leading: breadcrumbStatusLeading,
-        leadingKey: breadcrumbStatusKey,
-      },
-    ]);
+    const crumbs: Breadcrumb[] = [sourceBreadcrumb];
+    if (resolvedProject) {
+      crumbs.push({ label: resolvedProject.name, href: projectUrl(resolvedProject) });
+    }
+    crumbs.push({
+      // The status glyph (leading) already conveys in-progress/live state;
+      // no redundant 🔵 emoji prefix on the title.
+      label: breadcrumbTitle,
+      leading: breadcrumbStatusLeading,
+      leadingKey: breadcrumbStatusKey,
+    });
+    setBreadcrumbs(crumbs);
   }, [
     breadcrumbTitle,
     hasLiveRuns,
+    resolvedProject,
     setBreadcrumbs,
     sourceBreadcrumb.href,
     sourceBreadcrumb.label,
