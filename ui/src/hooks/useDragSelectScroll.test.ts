@@ -79,6 +79,30 @@ describe("useDragSelectScroll", () => {
     const before = el.scrollTop;
     rafCallbacks[0]!(0);
     expect(el.scrollTop).toBe(before);
+    // The loop must terminate: no follow-up frame scheduled.
+    expect(rafCallbacks.length).toBe(1);
+  });
+
+  it("stops the loop when scrollTop is clamped at a boundary", () => {
+    let scrollTop = 100;
+    const maxScrollTop = 100;
+    Object.defineProperty(el, "scrollTop", {
+      get: () => scrollTop,
+      set: (v: number) => {
+        scrollTop = Math.min(maxScrollTop, Math.max(0, v));
+      },
+    });
+
+    useDragSelectScroll({ current: el });
+
+    el.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }));
+    document.dispatchEvent(new MouseEvent("mousemove", { clientY: 390, bubbles: true }));
+
+    expect(rafCallbacks.length).toBe(1);
+    rafCallbacks[0]!(0);
+    // scrollTop was already at max, so the loop must not reschedule.
+    expect(el.scrollTop).toBe(maxScrollTop);
+    expect(rafCallbacks.length).toBe(1);
   });
 
   it("stops scrolling on mouseup", () => {

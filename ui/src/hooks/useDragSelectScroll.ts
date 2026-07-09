@@ -50,8 +50,13 @@ export function useDragSelectScroll(ref: RefObject<HTMLElement | null>) {
       }
 
       if (delta !== 0) {
+        const before = el.scrollTop;
         el.scrollTop += delta;
-        animationId = requestAnimationFrame(tick);
+        // Stop when clamped at a scroll boundary; the next mousemove
+        // restarts the loop, so we never spin at 60fps doing nothing.
+        if (el.scrollTop !== before) {
+          animationId = requestAnimationFrame(tick);
+        }
       }
     }
 
