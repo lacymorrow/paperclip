@@ -14,9 +14,11 @@ import { useRetryNowMutation } from "../hooks/useRetryNowMutation";
 import { IssueLinkQuicklook } from "./IssueLinkQuicklook";
 import { RetryErrorBand } from "./IssueScheduledRetryCard";
 import { isAssignedBacklogBlocker } from "../lib/issue-blockers";
+import { Badge } from "@/components/ui/badge";
 import {
   deriveActiveRecoveryDisplayState,
   RECOVERY_CHIP_DEFAULT_TONE,
+  recoveryChipLabel,
 } from "../lib/recovery-display";
 
 function BlockerRecoveryIndicator({ action }: { action: IssueRecoveryAction }) {
@@ -24,18 +26,20 @@ function BlockerRecoveryIndicator({ action }: { action: IssueRecoveryAction }) {
   if (!state) return null;
   const tone = RECOVERY_CHIP_DEFAULT_TONE[state];
   const Icon = tone.icon;
+  const label = recoveryChipLabel(state, action.kind);
   return (
-    <span
+    <Badge variant="outline"
       data-testid="issue-blocked-notice-recovery-indicator"
       data-recovery-state={state}
+      data-recovery-kind={action.kind}
       role="status"
-      aria-label={tone.label}
-      title={`${tone.label} — open the source issue to act.`}
-      className={`inline-flex shrink-0 items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${tone.className}`}
+      aria-label={label}
+      title={`${label} — open the source task to act.`}
+      className={`[&>svg]:size-2.5 gap-0.5 px-1.5 text-(length:--text-nano) ${tone.className}`}
     >
       <Icon className="h-2.5 w-2.5" aria-hidden />
-      {tone.label}
-    </span>
+      {label}
+    </Badge>
   );
 }
 
@@ -130,7 +134,7 @@ export function IssueBlockedNotice({
       ? { issueId, scheduledRetry }
       : null;
 
-  const blockerLabel = blockers.length === 1 ? "the linked issue" : "the linked issues";
+  const blockerLabel = blockers.length === 1 ? "the linked task" : "the linked tasks";
   const terminalBlockers = blockers
     .flatMap((blocker) => blocker.terminalBlockers ?? [])
     .filter((blocker, index, all) => all.findIndex((candidate) => candidate.id === blocker.id) === index);
@@ -186,7 +190,7 @@ export function IssueBlockedNotice({
         className="inline-flex max-w-full items-center gap-1 rounded-md border border-amber-300/70 bg-background/80 px-2 py-1 font-mono text-xs text-amber-950 transition-colors hover:border-amber-500 hover:bg-amber-100 hover:underline dark:border-amber-500/40 dark:bg-background/40 dark:text-amber-100 dark:hover:bg-amber-500/15"
       >
         <span>{blocker.identifier ?? blocker.id.slice(0, 8)}</span>
-        <span className="max-w-[18rem] truncate font-sans text-[11px] text-amber-800 dark:text-amber-200">
+        <span className="max-w-(--sz-18rem) truncate font-sans text-(length:--text-micro) text-amber-800 dark:text-amber-200">
           {blocker.title}
         </span>
         {recoveryAction ? <BlockerRecoveryIndicator action={recoveryAction} /> : null}
@@ -205,10 +209,10 @@ export function IssueBlockedNotice({
         <div className="min-w-0 space-y-1.5">
           {showSuccessfulRunHandoff ? (
             <>
-              <p className="font-medium leading-5">This issue still needs a next step.</p>
+              <p className="font-medium leading-5">This task still needs a next step.</p>
               <p className="leading-5">
-                A run finished successfully, but this issue is still open in{" "}
-                <code className="rounded bg-amber-100 px-1 py-0.5 text-[12px] dark:bg-amber-400/15">
+                A run finished successfully, but this task is still open in{" "}
+                <code className="rounded bg-amber-100 px-1 py-0.5 text-xs dark:bg-amber-400/15">
                   in_progress
                 </code>{" "}
                 with no clear owner for the next action.
@@ -233,7 +237,7 @@ export function IssueBlockedNotice({
                   </span>
                 ) : null}
                 <span className="rounded-md border border-amber-300/70 bg-background/80 px-2 py-1 text-amber-900 dark:border-amber-500/40 dark:bg-background/40 dark:text-amber-100">
-                  Corrective wake queued for {agentName ?? "the assignee"}
+                  Corrective wake queued for {agentName ?? "the responsible"}
                 </span>
               </div>
               {successfulRunHandoff.detectedProgressSummary ? (
@@ -258,10 +262,10 @@ export function IssueBlockedNotice({
                 {blockers.length > 0
                   ? isStalled
                     ? stalledLeafBlockers.length > 1
-                      ? <>Work on this issue is blocked by {blockerLabel}, but the chain is stalled in review without a clear next step. Resolve the stalled reviews below or remove them as blockers.</>
-                      : <>Work on this issue is blocked by {blockerLabel}, but the chain is stalled in review without a clear next step. Resolve the stalled review below or remove it as a blocker.</>
-                    : <>Work on this issue is blocked by {blockerLabel} until {blockers.length === 1 ? "it is" : "they are"} complete. Comments still wake the assignee for questions or triage.</>
-                  : <>Work on this issue is blocked until it is moved back to todo. Comments still wake the assignee for questions or triage.</>}
+                      ? <>Work on this task is blocked by {blockerLabel}, but the chain is stalled in review without a clear next step. Resolve the stalled reviews below or remove them as blockers.</>
+                      : <>Work on this task is blocked by {blockerLabel}, but the chain is stalled in review without a clear next step. Resolve the stalled review below or remove it as a blocker.</>
+                    : <>Work on this task is blocked by {blockerLabel} until {blockers.length === 1 ? "it is" : "they are"} complete. Comments still wake the responsible for questions or triage.</>
+                  : <>Work on this task is blocked until it is moved back to todo. Comments still wake the responsible for questions or triage.</>}
               </p>
               {blockers.length > 0 ? (
                 <div className="flex flex-wrap gap-1.5">
