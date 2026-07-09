@@ -13,7 +13,9 @@ import {
   printOutput,
   resolveCommandContext,
   type BaseClientOptions,
+  type ResolvedClientContext,
 } from "./common.js";
+import { ApiRequestError } from "../../client/http.js";
 
 // ---------------------------------------------------------------------------
 // Types mirroring server-side shapes
@@ -49,6 +51,120 @@ interface PluginInstallRequest {
   packageName: string;
   version?: string;
   isLocalPath: boolean;
+}
+
+interface PluginUpgradeOptions extends BaseClientOptions {
+  version?: string;
+}
+
+interface AlreadyInstalledError {
+  pluginId?: string;
+  pluginKey?: string;
+  currentVersion?: string;
+}
+
+export function getAlreadyInstalledInfo(error: unknown): AlreadyInstalledError | null {
+  if (!(error instanceof ApiRequestError)) return null;
+  if (error.status !== 409 && error.status !== 400) return null;
+
+  const body = (error.body ?? {}) as Record<string, unknown>;
+  const code = typeof body.code === "string" ? body.code : undefined;
+  const messageMatchesAlreadyInstalled = /plugin already installed/i.test(error.message);
+
+  if (code !== "already_installed" && !messageMatchesAlreadyInstalled) return null;
+
+  return {
+    pluginId: typeof body.pluginId === "string" ? body.pluginId : undefined,
+    pluginKey: typeof body.pluginKey === "string" ? body.pluginKey : undefined,
+    currentVersion: typeof body.currentVersion === "string" ? body.currentVersion : undefined,
+  };
+}
+
+async function resolvePluginIdByKey(
+  ctx: ResolvedClientContext,
+  pluginKey: string,
+): Promise<PluginRecord | null> {
+  // Try direct lookup first — server accepts both pluginId and pluginKey
+  // on /api/plugins/:pluginId routes via resolvePlugin().
+  try {
+    const direct = await ctx.api.get<PluginRecord>(
+      `/api/plugins/${encodeURIComponent(pluginKey)}`,
+      { ignoreNotFound: true },
+    );
+    if (direct) return direct;
+  } catch {
+    // fall through to list lookup
+  }
+
+  const plugins = (await ctx.api.get<PluginRecord[]>("/api/plugins")) ?? [];
+  return (
+    plugins.find((p) => p.pluginKey === pluginKey || p.id === pluginKey) ?? null
+  );
+}
+
+interface UpgradeResult {
+  outcome: "upgraded" | "pending" | "up_to_date";
+  plugin: PluginRecord | null;
+  previousVersion?: string;
+}
+
+async function performUpgrade(
+  ctx: ResolvedClientContext,
+  pluginIdOrKey: string,
+  version?: string,
+  knownPreviousVersion?: string,
+): Promise<UpgradeResult> {
+  const body = version ? { version } : undefined;
+  const upgraded = await ctx.api.post<PluginRecord>(
+    `/api/plugins/${encodeURIComponent(pluginIdOrKey)}/upgrade`,
+    body,
+  );
+
+  if (!upgraded) {
+    return { outcome: "up_to_date", plugin: null, previousVersion: knownPreviousVersion };
+  }
+
+  if (upgraded.status === "upgrade_pending") {
+    return { outcome: "pending", plugin: upgraded, previousVersion: knownPreviousVersion };
+  }
+
+  if (knownPreviousVersion && knownPreviousVersion === upgraded.version) {
+    return { outcome: "up_to_date", plugin: upgraded, previousVersion: knownPreviousVersion };
+  }
+
+  return { outcome: "upgraded", plugin: upgraded, previousVersion: knownPreviousVersion };
+}
+
+function printUpgradeResult(result: UpgradeResult, fallbackKey: string): void {
+  const key = result.plugin?.pluginKey ?? fallbackKey;
+  switch (result.outcome) {
+    case "upgraded": {
+      const from = result.previousVersion ? ` from v${result.previousVersion}` : "";
+      console.log(
+        pc.green(
+          `✓ Upgraded ${pc.bold(key)}${from} to v${result.plugin?.version ?? "?"} (${result.plugin?.status ?? "?"})`,
+        ),
+      );
+      break;
+    }
+    case "pending":
+      console.log(
+        pc.yellow(
+          `⏳ ${pc.bold(key)} is upgrade_pending — new capabilities require operator approval before activation.`,
+        ),
+      );
+      break;
+    case "up_to_date":
+      console.log(
+        pc.dim(
+          `Plugin ${pc.bold(key)} already on v${result.plugin?.version ?? result.previousVersion ?? "?"} — no changes.`,
+        ),
+      );
+      break;
+  }
+  if (result.plugin?.lastError) {
+    console.log(pc.red(`  Warning: ${result.plugin.lastError}`));
+  }
 }
 
 interface PluginUninstallOptions extends BaseClientOptions {
@@ -327,7 +443,45 @@ export function registerPluginCommands(program: Command): void {
             );
           }
 
-          const installedPlugin = await ctx.api.post<PluginRecord>("/api/plugins/install", installRequest);
+          let installedPlugin: PluginRecord | null = null;
+          try {
+            installedPlugin = await ctx.api.post<PluginRecord>("/api/plugins/install", installRequest);
+          } catch (err) {
+            const alreadyInstalled = getAlreadyInstalledInfo(err);
+            if (!alreadyInstalled) throw err;
+
+            // Fall through to upgrade path.
+            const target = alreadyInstalled.pluginId ?? alreadyInstalled.pluginKey;
+            if (!target) throw err;
+
+            if (!ctx.json) {
+              console.log(
+                pc.dim(
+                  `Plugin already installed${
+                    alreadyInstalled.currentVersion ? ` (v${alreadyInstalled.currentVersion})` : ""
+                  }. Upgrading to ${opts.version ? `v${opts.version}` : "latest version"}...`,
+                ),
+              );
+            }
+
+            const upgradeResult = await performUpgrade(
+              ctx,
+              target,
+              opts.version,
+              alreadyInstalled.currentVersion,
+            );
+
+            if (ctx.json) {
+              printOutput(upgradeResult.plugin, { json: true });
+              return;
+            }
+
+            printUpgradeResult(upgradeResult, alreadyInstalled.pluginKey ?? target);
+            if (installRequest.isLocalPath && upgradeResult.outcome !== "up_to_date") {
+              console.log(renderLocalPluginInstallHint(installRequest.packageName));
+            }
+            return;
+          }
 
           if (ctx.json) {
             printOutput(installedPlugin, { json: true });
@@ -352,6 +506,53 @@ export function registerPluginCommands(program: Command): void {
           if (installRequest.isLocalPath) {
             console.log(renderLocalPluginInstallHint(installRequest.packageName));
           }
+        } catch (err) {
+          handleCommandError(err);
+        }
+      }),
+  );
+
+  // -------------------------------------------------------------------------
+  // plugin upgrade <plugin-key-or-id>
+  // -------------------------------------------------------------------------
+  addCommonClientOptions(
+    plugin
+      .command("upgrade <pluginKey>")
+      .description(
+        "Upgrade an installed plugin to a newer version.\n" +
+          "  Examples:\n" +
+          "    paperclipai plugin upgrade @acme/plugin-linear         # upgrade to latest\n" +
+          "    paperclipai plugin upgrade @acme/plugin-linear --version 2.0.0",
+      )
+      .option("--version <version>", "Specific version to upgrade to (defaults to latest)")
+      .action(async (pluginKey: string, opts: PluginUpgradeOptions) => {
+        try {
+          const ctx = resolveCommandContext(opts);
+
+          const existing = await resolvePluginIdByKey(ctx, pluginKey);
+          if (!existing) {
+            console.error(pc.red(`Plugin not found: ${pluginKey}`));
+            process.exit(1);
+          }
+
+          if (!ctx.json) {
+            console.log(
+              pc.dim(
+                `Upgrading ${existing.pluginKey} (currently v${existing.version}) to ${
+                  opts.version ? `v${opts.version}` : "latest version"
+                }...`,
+              ),
+            );
+          }
+
+          const result = await performUpgrade(ctx, existing.id, opts.version, existing.version);
+
+          if (ctx.json) {
+            printOutput(result.plugin, { json: true });
+            return;
+          }
+
+          printUpgradeResult(result, existing.pluginKey);
         } catch (err) {
           handleCommandError(err);
         }

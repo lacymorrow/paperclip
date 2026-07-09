@@ -140,7 +140,12 @@ export function pluginRegistryService(db: Db) {
       const existing = await getByKey(manifest.id);
       if (existing) {
         if (existing.status !== "uninstalled") {
-          throw conflict(`Plugin already installed: ${manifest.id}`);
+          throw conflict(`Plugin already installed: ${manifest.id}`, {
+            code: "already_installed",
+            pluginId: existing.id,
+            pluginKey: existing.pluginKey,
+            currentVersion: existing.version,
+          });
         }
 
         // Reinstall after soft-delete: reactivate the existing row so plugin-scoped
@@ -183,7 +188,13 @@ export function pluginRegistryService(db: Db) {
         return rows[0];
       } catch (error) {
         if (isPluginKeyConflict(error)) {
-          throw conflict(`Plugin already installed: ${manifest.id}`);
+          const conflicting = await getByKey(manifest.id);
+          throw conflict(`Plugin already installed: ${manifest.id}`, {
+            code: "already_installed",
+            pluginId: conflicting?.id,
+            pluginKey: conflicting?.pluginKey ?? manifest.id,
+            currentVersion: conflicting?.version,
+          });
         }
         throw error;
       }

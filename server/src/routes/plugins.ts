@@ -77,7 +77,7 @@ import {
   extractSecretRefPathsFromConfig,
   PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
 } from "../services/plugin-secrets-handler.js";
-import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { badRequest, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -958,6 +958,22 @@ export function pluginRoutes(
         res.status(500).json({ error: "Plugin installed but not found in registry" });
       }
     } catch (err) {
+      if (err instanceof HttpError && err.status === 409) {
+        const details = (err.details ?? {}) as {
+          code?: string;
+          pluginId?: string;
+          pluginKey?: string;
+          currentVersion?: string;
+        };
+        res.status(409).json({
+          error: err.message,
+          code: details.code ?? "already_installed",
+          pluginId: details.pluginId,
+          pluginKey: details.pluginKey,
+          currentVersion: details.currentVersion,
+        });
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
