@@ -527,4 +527,31 @@ describe("MarkdownBody", () => {
     expect(html).toContain("paperclip-markdown-issue-ref");
     expect(html).not.toContain("paperclip-mention-chip--issue");
   });
+
+  it("renders local file path links as plain text instead of anchors", () => {
+    const html = renderMarkdown(
+      "[conventions](/Users/lmorrow/dev/code/docs/branch-and-commit-conventions.md)",
+    );
+
+    expect(html).not.toContain("<a");
+    expect(html).toContain(
+      '<code title="/Users/lmorrow/dev/code/docs/branch-and-commit-conventions.md"',
+    );
+    expect(html).toContain("conventions</code>");
+  });
+
+  it("renders file: URLs as plain text instead of anchors", () => {
+    const html = renderMarkdown("[my doc](file:///Users/lmorrow/doc.md)");
+
+    expect(html).not.toContain("<a");
+    expect(html).toContain('<code title="file:///Users/lmorrow/doc.md"');
+    expect(html).toContain("my doc</code>");
+  });
+
+  it("keeps uppercase company-prefixed routes as regular links", () => {
+    const html = renderMarkdown("[users board](/USERS/issues)");
+
+    expect(html).toContain('<a href="/USERS/issues"');
+    expect(html).not.toContain("<code");
+  });
 });

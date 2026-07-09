@@ -10,6 +10,7 @@ import { mentionChipInlineStyle, parseMentionChipHref } from "../lib/mention-chi
 import { issuesApi } from "../api/issues";
 import { queryKeys } from "../lib/queryKeys";
 import { parseIssueReferenceFromHref, remarkLinkIssueReferences } from "../lib/issue-reference";
+import { isLocalFileHref } from "../lib/local-file-href";
 import { remarkSoftBreaks } from "../lib/remark-soft-breaks";
 import { StatusIcon } from "./StatusIcon";
 
@@ -126,7 +127,11 @@ function extractMermaidSource(children: ReactNode): string | null {
 }
 
 function safeMarkdownUrlTransform(url: string): string {
-  return parseMentionChipHref(url) ? url : defaultUrlTransform(url);
+  if (parseMentionChipHref(url)) return url;
+  // Keep file: URLs intact so the anchor renderer can show them as plain
+  // text; defaultUrlTransform would strip them to an empty href.
+  if (isLocalFileHref(url)) return url;
+  return defaultUrlTransform(url);
 }
 
 type MarkdownAstNode = {
@@ -637,6 +642,19 @@ export function MarkdownBody({
           </a>
         );
       }
+      // Local file paths (e.g. /Users/...) are not routable in the browser —
+      // the router would misread the first segment as a company prefix.
+      if (isLocalFileHref(href)) {
+        return (
+          <code
+            title={href}
+            style={mergeWrapStyle(linkStyle as React.CSSProperties | undefined)}
+          >
+            {linkChildren}
+          </code>
+        );
+      }
+
       const isGitHubLink = isGitHubUrl(href);
       const isExternal = isExternalHttpUrl(href);
       const leadingIcon = isGitHubLink ? (
