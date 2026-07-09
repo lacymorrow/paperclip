@@ -2111,11 +2111,18 @@ function RequestConfirmationCard({
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <div className="mt-1 space-y-3 rounded-sm border border-border/70 bg-background/75 p-4">
-                  <div className="text-sm leading-6 text-foreground">
-                    {interaction.payload.prompt}
-                  </div>
+                  {interaction.payload.prompt ? (
+                    <div className="text-sm leading-6 text-foreground">
+                      {interaction.payload.prompt}
+                    </div>
+                  ) : null}
                   {interaction.payload.detailsMarkdown ? (
-                    <div className="border-t border-border/60 pt-3 text-sm">
+                    <div
+                      className={cn(
+                        "text-sm",
+                        interaction.payload.prompt && "border-t border-border/60 pt-3",
+                      )}
+                    >
                       <MarkdownBody externalReferences={externalReferences}>{interaction.payload.detailsMarkdown}</MarkdownBody>
                     </div>
                   ) : null}

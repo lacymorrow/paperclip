@@ -649,6 +649,34 @@ describe("IssueThreadInteractionCard", () => {
       "Approve the plan and let the responsible start implementation?",
     );
   });
+
+  it("omits the empty prompt block when a resolved confirmation has details only", async () => {
+    const host = renderCard({
+      interaction: {
+        ...pendingRequestConfirmationInteraction,
+        payload: { ...pendingRequestConfirmationInteraction.payload, prompt: "" },
+        status: "accepted",
+        result: { version: 1, outcome: "accepted" },
+      },
+    });
+
+    const toggle = Array.from(host.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Show details"),
+    );
+    expect(toggle).toBeTruthy();
+
+    await act(async () => {
+      toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(host.textContent).toContain(
+      "stale approvals are blocked if the plan changes",
+    );
+    const emptyPromptBlock = Array.from(host.querySelectorAll("div.leading-6")).find(
+      (node) => node.textContent === "",
+    );
+    expect(emptyPromptBlock).toBeFalsy();
+  });
 });
 
 describe("IssueThreadInteractionCard tool-action card", () => {
