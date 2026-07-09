@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Agent } from "@paperclipai/shared";
-import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, GitBranch, ListChecks, Loader2, MessageSquareQuote, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, GitBranch, ListChecks, Loader2, MessageSquareQuote, XCircle } from "lucide-react";
 import { Link } from "@/lib/router";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import {
@@ -22,6 +22,7 @@ import { cn, formatDateTime, formatShortDate } from "../lib/utils";
 import { MarkdownBody } from "./MarkdownBody";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible";
 import { PriorityIcon } from "./PriorityIcon";
 import { Textarea } from "./ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -42,6 +43,9 @@ interface IssueThreadInteractionCardProps {
   onSubmitInteractionAnswers?: (
     interaction: AskUserQuestionsInteraction,
     answers: AskUserQuestionsAnswer[],
+  ) => Promise<void> | void;
+  onCancelInteraction?: (
+    interaction: AskUserQuestionsInteraction,
   ) => Promise<void> | void;
 }
 
@@ -72,6 +76,8 @@ function statusLabel(status: IssueThreadInteraction["status"]) {
       return "Rejected";
     case "answered":
       return "Answered";
+    case "cancelled":
+      return "Cancelled";
     case "expired":
       return "Expired";
     case "failed":
@@ -100,6 +106,7 @@ function statusIcon(status: IssueThreadInteraction["status"]) {
     case "answered":
       return CheckCircle2;
     case "rejected":
+    case "cancelled":
     case "failed":
       return XCircle;
     case "expired":
@@ -118,6 +125,7 @@ function statusClasses(status: IssueThreadInteraction["status"]) {
         badge: "border-emerald-500/60 bg-emerald-500/10 text-emerald-900 dark:bg-emerald-500/15 dark:text-emerald-100",
       };
     case "rejected":
+    case "cancelled":
       return {
         shell: "border-rose-400/70 bg-transparent",
         badge: "border-rose-500/60 bg-rose-500/10 text-rose-900 dark:bg-rose-500/15 dark:text-rose-100",
@@ -636,11 +644,15 @@ function QuestionOptionButton({
 function AskUserQuestionsCard({
   interaction,
   onSubmitInteractionAnswers,
+  onCancelInteraction,
 }: {
   interaction: AskUserQuestionsInteraction;
   onSubmitInteractionAnswers?: (
     interaction: AskUserQuestionsInteraction,
     answers: AskUserQuestionsAnswer[],
+  ) => Promise<void> | void;
+  onCancelInteraction?: (
+    interaction: AskUserQuestionsInteraction,
   ) => Promise<void> | void;
 }) {
   const [draftAnswers, setDraftAnswers] = useState<Record<string, string[]>>(() =>
@@ -652,6 +664,7 @@ function AskUserQuestionsCard({
     ),
   );
   const [working, setWorking] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   useEffect(() => {
     setDraftAnswers(
@@ -696,6 +709,16 @@ function AskUserQuestionsCard({
       );
     } finally {
       setWorking(false);
+    }
+  }
+
+  async function handleCancel() {
+    if (!onCancelInteraction) return;
+    setCancelling(true);
+    try {
+      await onCancelInteraction(interaction);
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -765,25 +788,53 @@ function AskUserQuestionsCard({
             </div>
           ))}
 
-          <div className="flex items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/75 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 bg-background/75 p-4">
             <div className="text-sm text-muted-foreground">
               Submit once after you finish the full form.
             </div>
-            <Button
-              size="sm"
-              disabled={!onSubmitInteractionAnswers || !canSubmit || working}
-              onClick={() => void handleSubmit()}
-            >
-              {working ? (
-                <>
-                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                  Submitting...
-                </>
-              ) : (
-                interaction.payload.submitLabel ?? "Submit answers"
-              )}
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              {onCancelInteraction ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={working || cancelling}
+                  onClick={() => void handleCancel()}
+                >
+                  {cancelling ? (
+                    <>
+                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                      Cancelling...
+                    </>
+                  ) : (
+                    "Cancel question"
+                  )}
+                  </Button>
+                ) : null}
+              <Button
+                size="sm"
+                disabled={!onSubmitInteractionAnswers || !canSubmit || working || cancelling}
+                onClick={() => void handleSubmit()}
+              >
+                {working ? (
+                  <>
+                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                    Submitting...
+                  </>
+                ) : (
+                  interaction.payload.submitLabel ?? "Submit answers"
+                )}
+              </Button>
+            </div>
           </div>
+        </div>
+      ) : interaction.status === "cancelled" ? (
+        <div className="rounded-2xl border border-rose-300/60 bg-rose-50/85 p-4 text-sm leading-6 text-rose-950 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-100">
+          <div className="font-semibold">Question cancelled</div>
+          {interaction.result?.cancellationReason ? (
+            <p className="mt-1">{interaction.result.cancellationReason}</p>
+          ) : (
+            <p className="mt-1">No answer was recorded.</p>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -986,6 +1037,7 @@ function RequestConfirmationCard({
     reason?: string,
   ) => Promise<void> | void;
 }) {
+  const [planOpen, setPlanOpen] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [working, setWorking] = useState<"accept" | "reject" | null>(null);
   const [rejectReason, setRejectReason] = useState(interaction.result?.reason ?? "");
@@ -1057,6 +1109,35 @@ function RequestConfirmationCard({
             target={interaction.payload.target}
           />
         </div>
+      ) : (interaction.payload.prompt || interaction.payload.detailsMarkdown || interaction.payload.target) ? (
+        <Collapsible open={planOpen} onOpenChange={setPlanOpen}>
+          <CollapsibleTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 w-full justify-between px-2 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <span>{planOpen ? "Hide details" : "Show details"}</span>
+              <ChevronDown className={cn("h-3.5 w-3.5 transition-transform duration-200", planOpen && "rotate-180")} />
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="mt-1 space-y-3 rounded-sm border border-border/70 bg-background/75 p-4">
+              <div className="text-sm leading-6 text-foreground">
+                {interaction.payload.prompt}
+              </div>
+              {interaction.payload.detailsMarkdown ? (
+                <div className="border-t border-border/60 pt-3 text-sm">
+                  <MarkdownBody>{interaction.payload.detailsMarkdown}</MarkdownBody>
+                </div>
+              ) : null}
+              <RequestConfirmationTargetChip
+                interaction={interaction}
+                target={interaction.payload.target}
+              />
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
       ) : null}
 
       {interaction.status === "pending" ? (
@@ -1162,6 +1243,7 @@ export function IssueThreadInteractionCard({
   onAcceptInteraction,
   onRejectInteraction,
   onSubmitInteractionAnswers,
+  onCancelInteraction,
 }: IssueThreadInteractionCardProps) {
   const StatusIcon = statusIcon(interaction.status);
   const styles = statusClasses(interaction.status);
@@ -1247,6 +1329,7 @@ export function IssueThreadInteractionCard({
           <AskUserQuestionsCard
             interaction={interaction}
             onSubmitInteractionAnswers={onSubmitInteractionAnswers}
+            onCancelInteraction={onCancelInteraction}
           />
         ) : (
           <RequestConfirmationCard

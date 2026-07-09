@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -45,10 +45,13 @@ jobs:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -63,7 +66,9 @@ jobs:
         run: pnpm build
 
   publish_canary:
-    if: github.event_name == 'push'
+    # Publishing requires npm auth held only by the upstream repo; forks skip
+    # this job so master pushes stay green while verify_canary still runs.
+    if: github.event_name == 'push' && github.repository == 'paperclipai/paperclip'
     needs: verify_canary
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -74,7 +79,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -84,10 +89,13 @@ jobs:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -123,7 +131,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_ref }}
@@ -134,10 +142,13 @@ jobs:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -161,7 +172,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_ref }}
@@ -172,10 +183,13 @@ jobs:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Validate release package manifest
+        run: node ./scripts/release-package-map.mjs check
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -191,7 +205,8 @@ jobs:
           ./scripts/release.sh "${args[@]}"
 
   publish_stable:
-    if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+    # Same fork guard as publish_canary: stable publishes need upstream npm auth.
+    if: github.event_name == 'workflow_dispatch' && !inputs.dry_run && github.repository == 'paperclipai/paperclip'
     needs: verify_stable
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -202,7 +217,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ inputs.source_ref }}
@@ -213,7 +228,7 @@ jobs:
           version: 9.15.4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: pnpm
