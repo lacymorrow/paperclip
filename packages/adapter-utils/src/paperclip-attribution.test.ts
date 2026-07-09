@@ -209,6 +209,37 @@ describe("materializePaperclipSkill", () => {
     expect(targetStat.isDirectory()).toBe(true);
   });
 
+  it("replaces a materialized directory with a symlink when attribution is re-enabled", async () => {
+    const source = await makeSourceSkill();
+    const target = path.join(workspace, "target");
+    const first = await materializePaperclipSkill(source, target, { commit: false, pr: true });
+    expect(first).toBe("created");
+
+    const second = await materializePaperclipSkill(source, target, { commit: true, pr: true });
+
+    expect(second).toBe("repaired");
+    const stat = await fs.lstat(target);
+    expect(stat.isSymbolicLink()).toBe(true);
+    const linked = await fs.readlink(target);
+    expect(path.resolve(path.dirname(target), linked)).toBe(source);
+    const skill = await fs.readFile(path.join(target, "SKILL.md"), "utf8");
+    expect(skill).toContain("Co-Authored-By");
+  });
+
+  it("does not delete an operator-placed directory when attribution is enabled", async () => {
+    const source = await makeSourceSkill();
+    const target = path.join(workspace, "target");
+    await fs.mkdir(target, { recursive: true });
+    await fs.writeFile(path.join(target, "SKILL.md"), "operator content", "utf8");
+    await fs.writeFile(path.join(target, "notes.md"), "not a symlink", "utf8");
+
+    const result = await materializePaperclipSkill(source, target, { commit: true, pr: true });
+
+    expect(result).toBe("skipped");
+    expect(await fs.readFile(path.join(target, "SKILL.md"), "utf8")).toBe("operator content");
+    expect(await fs.readFile(path.join(target, "notes.md"), "utf8")).toBe("not a symlink");
+  });
+
   it("rebuilds when source has lost a file since the last materialization", async () => {
     const source = await makeSourceSkill();
     const target = path.join(workspace, "target");

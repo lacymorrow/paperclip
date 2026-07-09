@@ -2619,6 +2619,32 @@ async function readMaterializedSkillState(
   return "other";
 }
 
+async function isPaperclipSkillMaterializedDirectory(
+  source: string,
+  target: string,
+): Promise<boolean> {
+  const targetEntries = await fs.readdir(target, { withFileTypes: true }).catch(() => null);
+  if (!targetEntries) return false;
+  if (!targetEntries.some((entry) => entry.name === "SKILL.md")) return false;
+
+  for (const entry of targetEntries) {
+    const targetEntryPath = path.join(target, entry.name);
+    if (entry.name === "SKILL.md") {
+      const stat = await fs.lstat(targetEntryPath).catch(() => null);
+      if (!stat?.isFile()) return false;
+      continue;
+    }
+    const linkStat = await fs.lstat(targetEntryPath).catch(() => null);
+    if (!linkStat?.isSymbolicLink()) return false;
+    const linkedPath = await fs.readlink(targetEntryPath).catch(() => null);
+    if (!linkedPath) return false;
+    const resolved = path.resolve(path.dirname(targetEntryPath), linkedPath);
+    if (resolved !== source && !resolved.startsWith(source + path.sep)) return false;
+  }
+
+  return true;
+}
+
 async function isPaperclipSkillMaterializationCurrent(
   source: string,
   target: string,
@@ -2684,6 +2710,15 @@ export async function materializePaperclipSkill(
     fs.symlink(linkSource, linkTarget),
 ): Promise<"created" | "repaired" | "skipped"> {
   if (preference.commit) {
+    // A prior attribution-disabled run may have materialized a rewritten
+    // directory at the target; replace it with a plain symlink so re-enabling
+    // attribution takes effect. Operator-placed directories are left alone.
+    const state = await readMaterializedSkillState(target);
+    if (state === "directory" && (await isPaperclipSkillMaterializedDirectory(source, target))) {
+      await fs.rm(target, { recursive: true, force: true });
+      await linkSkill(source, target);
+      return "repaired";
+    }
     return ensurePaperclipSkillSymlink(source, target, linkSkill);
   }
 
