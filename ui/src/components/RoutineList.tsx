@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { useCopyLink } from "../hooks/useCopyLink";
 
 export type RoutineListProjectSummary = {
   name: string;
@@ -94,6 +95,7 @@ export function RoutineListRow<TRoutine extends RoutineListRowItem>({
   onToggleEnabled: (routine: TRoutine, enabled: boolean) => void;
   onToggleArchived?: (routine: TRoutine) => void;
 }) {
+  const copyLink = useCopyLink();
   const enabled = routine.status === "active";
   const isArchived = routine.status === "archived";
   const isStatusPending = statusMutationRoutineId === routine.id;
@@ -212,7 +214,7 @@ export function RoutineListRow<TRoutine extends RoutineListRowItem>({
           <ExternalLink className="h-4 w-4" />
           Open in new tab
         </ContextMenuItem>
-        <ContextMenuItem onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${href}`).catch(() => {}); }}>
+        <ContextMenuItem onClick={() => copyLink(href)}>
           <Link2 className="h-4 w-4" />
           Copy link
         </ContextMenuItem>

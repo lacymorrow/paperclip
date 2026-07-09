@@ -35,6 +35,7 @@ import {
   useResourceMembershipMutation,
   useResourceMemberships,
 } from "../hooks/useResourceMemberships";
+import { useCopyLink } from "../hooks/useCopyLink";
 
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
 
@@ -162,6 +163,7 @@ function filterOrgTree(nodes: OrgNode[], tab: FilterTab): OrgNode[] {
 export function Agents() {
   const { selectedCompanyId } = useCompany();
   const { openNewAgent } = useDialogActions();
+  const copyLink = useCopyLink();
   const { setBreadcrumbs } = useBreadcrumbs();
   const navigate = useNavigate();
   const location = useLocation();
@@ -399,7 +401,7 @@ export function Agents() {
             <ExternalLink className="h-4 w-4" />
             Open in new tab
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${agentHref}`).catch(() => {}); }}>
+          <ContextMenuItem onClick={() => copyLink(agentHref)}>
             <Link2 className="h-4 w-4" />
             Copy link
           </ContextMenuItem>
@@ -547,6 +549,7 @@ function OrgTreeNode({
   memberships: ReturnType<typeof useResourceMemberships>["data"];
   membershipMutation: ReturnType<typeof useResourceMembershipMutation>;
 }) {
+  const copyLink = useCopyLink();
   const agent = agentMap.get(node.id);
   const hasInvalidOrgChain = Boolean(agent && agent.orgChainHealth?.status === "invalid_org_chain");
   const membershipState = resourceMembershipState(memberships, "agent", node.id);
@@ -658,7 +661,7 @@ function OrgTreeNode({
             <ExternalLink className="h-4 w-4" />
             Open in new tab
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => { navigator.clipboard.writeText(`${window.location.origin}${nodeHref}`).catch(() => {}); }}>
+          <ContextMenuItem onClick={() => copyLink(nodeHref)}>
             <Link2 className="h-4 w-4" />
             Copy link
           </ContextMenuItem>

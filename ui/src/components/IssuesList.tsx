@@ -10,6 +10,7 @@ import { authApi } from "../api/auth";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { useIssueExternalObjectSummaries } from "../hooks/useIssueExternalObjects";
+import { useCopyLink } from "../hooks/useCopyLink";
 import {
   shouldBlurPageSearchOnEnter,
   shouldBlurPageSearchOnEscape,
@@ -663,6 +664,7 @@ export function IssuesList({
     if (!pointerMovedSinceKeyNavRef.current) return;
     setSelectedNavIssueId(issueId);
   }, []);
+  const copyLink = useCopyLink();
   const { selectedCompanyId } = useCompany();
   const { openNewIssue } = useDialogActions();
   const { data: session } = useQuery({
@@ -2159,13 +2161,7 @@ export function IssuesList({
                             <ExternalLink className="h-4 w-4" />
                             Open in new tab
                           </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() => {
-                              navigator.clipboard
-                                .writeText(`${window.location.origin}${issueHref}`)
-                                .catch(() => {});
-                            }}
-                          >
+                          <ContextMenuItem onClick={() => copyLink(issueHref)}>
                             <Link2 className="h-4 w-4" />
                             Copy link
                           </ContextMenuItem>
