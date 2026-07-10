@@ -1,5 +1,6 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
+import { useVisibilityRefetchInterval } from "@/lib/polling";
 import { accessApi } from "../api/access";
 import { useDialogActions } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
@@ -97,6 +98,21 @@ import { Badge } from "@/components/ui/badge";
 const ISSUE_SEARCH_DEBOUNCE_MS = 250;
 const ISSUE_SEARCH_RESULT_LIMIT = 200;
 const ISSUE_BOARD_COLUMN_RESULT_LIMIT = 200;
+type IssuesListNavEntry =
+  | { type: "group"; key: string; collapsed: boolean }
+  | { type: "issue"; issue: Issue; hasChildren: boolean; expanded: boolean; budgetOrdinal: number };
+
+function issuesListNavEntryKey(entry: IssuesListNavEntry): string {
+  return entry.type === "group" ? `group:${entry.key}` : `issue:${entry.issue.id}`;
+}
+
+// CSS.escape is missing in some non-browser environments (jsdom tests).
+function escapeAttrValue(value: string): string {
+  return typeof CSS !== "undefined" && typeof CSS.escape === "function"
+    ? CSS.escape(value)
+    : value.replace(/["\\]/g, "\\$&");
+}
+
 const INITIAL_ISSUE_ROW_RENDER_LIMIT = 100;
 const ISSUE_ROW_RENDER_BATCH_SIZE = 150;
 const ISSUE_SCROLL_LOAD_THRESHOLD_PX = 320;
@@ -518,11 +534,12 @@ function SubIssueProgressSummaryStrip({
   // Refresh fast enough that the runtime ticks up while a sub-issue is still
   // running, but slow enough not to hammer the recursive CTE on idle trees.
   const hasInProgress = summary.inProgressCount > 0;
+  const costRefetchInterval = useVisibilityRefetchInterval({ visibleMs: 5_000 });
   const { data: costSummary } = useQuery({
     queryKey: queryKeys.issues.costSummary(parentIssueIdForCostSummary ?? "pending", { excludeRoot: true }),
     queryFn: () => issuesApi.getCostSummary(parentIssueIdForCostSummary!, { excludeRoot: true }),
     enabled: !!parentIssueIdForCostSummary,
-    refetchInterval: hasInProgress ? 5_000 : false,
+    refetchInterval: hasInProgress ? costRefetchInterval : false,
   });
 
   const totalTokens = costSummary
@@ -651,7 +668,7 @@ export function IssuesList({
   // Keyboard selection for the list view (mirrors the inbox). Hover moves the
   // selection only after real pointer movement, so keyboard-driven scrolling
   // doesn't hand the selection to whatever row lands under the cursor.
-  const [selectedNavIssueId, setSelectedNavIssueId] = useState<string | null>(null);
+  const [selectedNavKey, setSelectedNavKey] = useState<string | null>(null);
   const pointerMovedSinceKeyNavRef = useRef(true);
   useEffect(() => {
     const handlePointerMove = () => {
@@ -660,9 +677,18 @@ export function IssuesList({
     window.addEventListener("mousemove", handlePointerMove, { passive: true });
     return () => window.removeEventListener("mousemove", handlePointerMove);
   }, []);
-  const setNavSelectionFromPointer = useCallback((issueId: string) => {
+  // Which entry the cursor is over, tracked WITHOUT React state so scrubbing the
+  // list costs zero re-renders (hover paints via CSS `:hover`). Keyboard nav
+  // reads this to continue from the hovered row. Key-based, so it self-heals if
+  // the entry disappears (findIndex → -1).
+  const hoveredNavKeyRef = useRef<string | null>(null);
+  const setNavSelectionFromPointer = useCallback((navKey: string) => {
     if (!pointerMovedSinceKeyNavRef.current) return;
-    setSelectedNavIssueId(issueId);
+    hoveredNavKeyRef.current = navKey;
+    // Drop any keyboard selection band the moment the mouse takes over, so we
+    // never show two identical highlights at once. React bails when already
+    // null, so continuous hovering triggers no re-render.
+    setSelectedNavKey((prev) => (prev === null ? prev : null));
   }, []);
   const copyLink = useCopyLink();
   const { selectedCompanyId } = useCompany();
@@ -755,17 +781,18 @@ export function IssuesList({
     queryKey: [
       ...queryKeys.issues.search(selectedCompanyId!, normalizedIssueSearch, projectId),
       searchFilters ?? {},
+      "compact",
       ISSUE_SEARCH_RESULT_LIMIT,
       enableRoutineVisibilityFilter ? "with-routine-executions" : "without-routine-executions",
     ],
-    queryFn: () =>
-      issuesApi.list(selectedCompanyId!, {
+    queryFn: ({ signal }) =>
+      issuesApi.listCompact(selectedCompanyId!, {
         q: normalizedIssueSearch,
         projectId,
         limit: ISSUE_SEARCH_RESULT_LIMIT,
         ...searchFilters,
         ...(enableRoutineVisibilityFilter ? { includeRoutineExecutions: true } : {}),
-      }),
+      }, { signal }).then((rows) => rows as Issue[]),
     enabled: !!selectedCompanyId && normalizedIssueSearch.length > 0 && !searchWithinLoadedIssues,
     placeholderData: (previousData) => previousData,
   });
@@ -778,18 +805,19 @@ export function IssuesList({
         normalizedIssueSearch,
         projectId ?? "__all-projects__",
         searchFilters ?? {},
+        "compact",
         ISSUE_BOARD_COLUMN_RESULT_LIMIT,
         enableRoutineVisibilityFilter ? "with-routine-executions" : "without-routine-executions",
       ],
-      queryFn: () =>
-        issuesApi.list(selectedCompanyId!, {
+      queryFn: ({ signal }: { signal: AbortSignal }) =>
+        issuesApi.listCompact(selectedCompanyId!, {
           ...searchFilters,
           ...(normalizedIssueSearch.length > 0 ? { q: normalizedIssueSearch } : {}),
           projectId,
           status,
           limit: ISSUE_BOARD_COLUMN_RESULT_LIMIT,
           ...(enableRoutineVisibilityFilter ? { includeRoutineExecutions: true } : {}),
-        }),
+        }, { signal }).then((rows) => rows as Issue[]),
       enabled: !!selectedCompanyId && viewState.viewMode === "board" && !searchWithinLoadedIssues,
       placeholderData: (previousData: Issue[] | undefined) => previousData,
     })),
@@ -1232,21 +1260,35 @@ export function IssuesList({
     projectById,
   ]);
 
-  // Flattened visible row order (groups -> tree DFS, skipping collapsed
-  // groups/parents) — must match render order below for keyboard traversal.
-  const flatNavIssues = useMemo(() => {
-    if (viewState.viewMode !== "list") return [] as Issue[];
-    const out: Issue[] = [];
+  // Flattened visible order (group headers, then tree DFS per group —
+  // collapsed groups keep their header entry but skip their rows) — must
+  // match render order below for keyboard traversal. `budgetOrdinal` counts
+  // rows the way the progressive renderer consumes its budget (collapsed
+  // groups still consume rows; collapsed parents' subtrees do not).
+  const flatNavEntries = useMemo(() => {
+    if (viewState.viewMode !== "list") return [] as IssuesListNavEntry[];
+    const out: IssuesListNavEntry[] = [];
+    let budgetCount = 0;
     for (const group of groupedContent) {
-      if (group.label && viewState.collapsedGroups.includes(group.key)) continue;
+      const collapsed = Boolean(group.label) && viewState.collapsedGroups.includes(group.key);
+      if (group.label) out.push({ type: "group", key: group.key, collapsed });
       const { roots, childMap } = viewState.nestingEnabled
         ? buildIssueTree(group.items)
         : { roots: group.items, childMap: new Map<string, Issue[]>() };
       const walk = (issue: Issue) => {
-        out.push(issue);
-        if (!viewState.collapsedParents.includes(issue.id)) {
-          for (const child of childMap.get(issue.id) ?? []) walk(child);
+        budgetCount += 1;
+        const children = childMap.get(issue.id) ?? [];
+        const expanded = !viewState.collapsedParents.includes(issue.id);
+        if (!collapsed) {
+          out.push({
+            type: "issue",
+            issue,
+            hasChildren: children.length > 0,
+            expanded,
+            budgetOrdinal: budgetCount,
+          });
         }
+        if (expanded) for (const child of children) walk(child);
       };
       for (const root of roots) walk(root);
     }
@@ -1259,11 +1301,35 @@ export function IssuesList({
     viewState.nestingEnabled,
   ]);
 
-  const listNavStateRef = useRef({ flatNavIssues, selectedNavIssueId, viewMode: viewState.viewMode, issueLinkState });
-  listNavStateRef.current = { flatNavIssues, selectedNavIssueId, viewMode: viewState.viewMode, issueLinkState };
+  const listNavStateRef = useRef({
+    flatNavEntries,
+    selectedNavKey,
+    viewMode: viewState.viewMode,
+    issueLinkState,
+    collapsedGroups: viewState.collapsedGroups,
+    collapsedParents: viewState.collapsedParents,
+    updateView,
+  });
+  listNavStateRef.current = {
+    flatNavEntries,
+    selectedNavKey,
+    viewMode: viewState.viewMode,
+    issueLinkState,
+    collapsedGroups: viewState.collapsedGroups,
+    collapsedParents: viewState.collapsedParents,
+    updateView,
+  };
 
-  const findSelectedNavRowLink = useCallback((issueId: string) => {
-    const row = rootRef.current?.querySelector(`[data-issue-row-id="${CSS.escape(issueId)}"]`);
+  const findSelectedNavElement = useCallback((navKey: string) => {
+    if (navKey.startsWith("group:")) {
+      const header = rootRef.current?.querySelector(
+        `[data-issues-group-key="${escapeAttrValue(navKey.slice("group:".length))}"]`,
+      );
+      return header instanceof HTMLElement ? header : null;
+    }
+    const row = rootRef.current?.querySelector(
+      `[data-issue-row-id="${escapeAttrValue(navKey.slice("issue:".length))}"]`,
+    );
     const link = row?.querySelector(":scope > [data-inbox-issue-link]");
     return link instanceof HTMLElement ? link : null;
   }, []);
@@ -1284,10 +1350,16 @@ export function IssuesList({
         return;
       }
       const st = listNavStateRef.current;
-      if (st.viewMode !== "list" || st.flatNavIssues.length === 0) return;
-      const currentIndex = st.selectedNavIssueId
-        ? st.flatNavIssues.findIndex((issue) => issue.id === st.selectedNavIssueId)
-        : -1;
+      if (st.viewMode !== "list" || st.flatNavEntries.length === 0) return;
+      // The row a keystroke acts on: the hovered row when the mouse moved since
+      // the last key nav (so "hover a row → press Arrow/Enter" acts on it),
+      // otherwise the keyboard selection. Hover no longer writes selection
+      // state, so this threads the pointer position into every handler.
+      const indexOfKey = (key: string | null) =>
+        key ? st.flatNavEntries.findIndex((entry) => issuesListNavEntryKey(entry) === key) : -1;
+      const hoveredIndex = indexOfKey(hoveredNavKeyRef.current);
+      const fromHover = pointerMovedSinceKeyNavRef.current && hoveredIndex >= 0;
+      const currentIndex = fromHover ? hoveredIndex : indexOfKey(st.selectedNavKey);
       switch (e.key) {
         case "j":
         case "ArrowDown":
@@ -1296,23 +1368,54 @@ export function IssuesList({
           e.preventDefault();
           pointerMovedSinceKeyNavRef.current = false;
           const direction = e.key === "j" || e.key === "ArrowDown" ? "next" : "previous";
-          const nextIndex = getInboxKeyboardSelectionIndex(currentIndex, st.flatNavIssues.length, direction);
-          const nextIssue = st.flatNavIssues[nextIndex];
-          if (!nextIssue) break;
-          setSelectedNavIssueId(nextIssue.id);
+          const nextIndex = getInboxKeyboardSelectionIndex(currentIndex, st.flatNavEntries.length, direction);
+          const nextEntry = st.flatNavEntries[nextIndex];
+          if (!nextEntry) break;
+          setSelectedNavKey(issuesListNavEntryKey(nextEntry));
           // The list renders progressively; make sure the selected row is
           // within the render budget so the band mounts and can scroll into
           // view (the +1 keeps the next row visible as a scroll cue).
-          setRenderedIssueRowLimit((current) => Math.max(current, nextIndex + 2));
+          if (nextEntry.type === "issue") {
+            setRenderedIssueRowLimit((current) => Math.max(current, nextEntry.budgetOrdinal + 1));
+          }
+          break;
+        }
+        case "ArrowLeft":
+        case "ArrowRight": {
+          // Groups and parent tasks collapse/expand with the same keys as the
+          // inbox.
+          const entry = st.flatNavEntries[currentIndex];
+          if (!entry) return;
+          const collapse = e.key === "ArrowLeft";
+          if (entry.type === "group") {
+            e.preventDefault();
+            pointerMovedSinceKeyNavRef.current = false;
+            setSelectedNavKey(issuesListNavEntryKey(entry));
+            st.updateView({
+              collapsedGroups: collapse
+                ? (st.collapsedGroups.includes(entry.key) ? st.collapsedGroups : [...st.collapsedGroups, entry.key])
+                : st.collapsedGroups.filter((k) => k !== entry.key),
+            });
+            break;
+          }
+          if (!entry.hasChildren) return;
+          e.preventDefault();
+          pointerMovedSinceKeyNavRef.current = false;
+          setSelectedNavKey(issuesListNavEntryKey(entry));
+          st.updateView({
+            collapsedParents: collapse
+              ? (st.collapsedParents.includes(entry.issue.id) ? st.collapsedParents : [...st.collapsedParents, entry.issue.id])
+              : st.collapsedParents.filter((id) => id !== entry.issue.id),
+          });
           break;
         }
         case "Enter": {
-          if (currentIndex < 0) return;
-          const issue = st.flatNavIssues[currentIndex];
-          if (!issue) return;
+          const entry = st.flatNavEntries[currentIndex];
+          if (!entry || entry.type !== "issue") return;
           e.preventDefault();
           // Navigate from the entry data (like the inbox) rather than the DOM
           // row — the selected row may sit past the mounted render batch.
+          const issue = entry.issue;
           const pathId = issue.identifier ?? issue.id;
           const detailState = withIssueDetailHeaderSeed(st.issueLinkState, issue);
           rememberIssueDetailLocationState(pathId, detailState);
@@ -1331,9 +1434,9 @@ export function IssuesList({
   // render budget too: a selection past the mounted batch scrolls once its
   // row mounts.
   useEffect(() => {
-    if (!selectedNavIssueId) return;
-    findSelectedNavRowLink(selectedNavIssueId)?.scrollIntoView({ block: "nearest" });
-  }, [findSelectedNavRowLink, renderedIssueRowLimit, selectedNavIssueId]);
+    if (!selectedNavKey) return;
+    findSelectedNavElement(selectedNavKey)?.scrollIntoView({ block: "nearest" });
+  }, [findSelectedNavElement, renderedIssueRowLimit, selectedNavKey]);
 
   useEffect(() => {
     if (viewState.viewMode !== "list") return;
@@ -1356,9 +1459,7 @@ export function IssuesList({
   const loadMoreIssueRows = useCallback(() => {
     if (viewState.viewMode !== "list") return;
     if (hasMoreRenderedRows) {
-      startTransition(() => {
-        setRenderedIssueRowLimit((current) => Math.min(filtered.length, current + ISSUE_ROW_RENDER_BATCH_SIZE));
-      });
+      setRenderedIssueRowLimit((current) => Math.min(filtered.length, current + ISSUE_ROW_RENDER_BATCH_SIZE));
       return;
     }
     if (hasMoreIssues && !isLoadingMoreIssues) {
@@ -1796,6 +1897,15 @@ export function IssuesList({
             }}
           >
             {group.label && (
+              // Left inset aligns the header chevron with the nested task
+              // chevrons: tasks-list rows sit at pl-1 before their chevron
+              // (no unread column), so the band adds no extra left inset.
+              <div
+                data-issues-group-key={group.key}
+                className={cn("rounded-lg px-3 sm:pl-0 sm:pr-4", selectedNavKey === `group:${group.key}` ? "bg-accent/50" : "hover:bg-accent/50")}
+                onClick={() => setSelectedNavKey(`group:${group.key}`)}
+                onMouseEnter={() => setNavSelectionFromPointer(`group:${group.key}`)}
+              >
               <IssueGroupHeader
                 label={group.label}
                 collapsible
@@ -1820,6 +1930,7 @@ export function IssuesList({
                   </Button>
                 )}
               />
+              </div>
             )}
             <CollapsibleContent>
               {(() => {
@@ -1939,9 +2050,10 @@ export function IssuesList({
                             <IssueRow
                               issue={issue}
                               issueLinkState={issueLinkState}
-                              selected={selectedNavIssueId === issue.id}
-                              onMouseEnter={() => setNavSelectionFromPointer(issue.id)}
+                              selected={selectedNavKey === `issue:${issue.id}`}
+                              onMouseEnter={() => setNavSelectionFromPointer(`issue:${issue.id}`)}
                               treeGuides={depth}
+                              chevronInGuide={depth > 0 && hasChildren}
                               hideDivider={hasChildren && isExpanded}
                               checklistStepNumber={checklistStepNumber}
                               checklistCurrentStep={checklistMeta?.currentStepIssueId === issue.id}
@@ -1984,7 +2096,7 @@ export function IssuesList({
                                   ) : null}
                                 </>
                               )}
-                              className={cn(isMutedIssue && "opacity-70", selectedNavIssueId === issue.id && "bg-accent/50")}
+                              className={cn(isMutedIssue && "opacity-70", selectedNavKey === `issue:${issue.id}` && "bg-accent/50 hover:bg-accent/50")}
                               mobileLeading={
                                 hasChildren ? (
                                   <button type="button" data-slot="icon-button" onClick={toggleCollapse}>
@@ -2002,13 +2114,13 @@ export function IssuesList({
                                     <button
                                       type="button"
                                       data-slot="icon-button"
-                                      className="hidden shrink-0 items-center sm:inline-flex"
+                                      className="relative z-10 hidden w-4 shrink-0 items-center justify-center sm:inline-flex"
                                       onClick={toggleCollapse}
                                     >
                                       <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
                                     </button>
                                   ) : (
-                                    <span className="hidden w-3.5 shrink-0 sm:block" />
+                                    <span className="hidden w-4 shrink-0 sm:block" />
                                   )}
                                   <InboxIssueMetaLeading
                                     issue={issue}

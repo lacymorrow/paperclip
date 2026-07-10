@@ -48,6 +48,8 @@ const GOALS_SIDEBAR_LINK_TOGGLE_SELECTOR =
   'button[aria-label="Toggle goals sidebar link experimental setting"]';
 const SERVER_INFO_TOGGLE_SELECTOR =
   'button[aria-label="Toggle server info debug view experimental setting"]';
+const BUILT_IN_AGENTS_TOGGLE_SELECTOR =
+  'button[aria-label="Toggle built-in agents experimental setting"]';
 
 function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
   return {
@@ -59,6 +61,7 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enableIssuePlanDecompositions: false,
     enableExperimentalFileViewer: false,
     enableExternalObjects: false,
+    enableBuiltInAgents: false,
     enableGoalsSidebarLink: false,
     enableTaskWatchdogs: false,
     enableCloudSync: false,
@@ -66,7 +69,8 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     autoRestartDevServerWhenIdle: false,
     enableIssueGraphLivenessAutoRecovery: false,
     issueGraphLivenessAutoRecoveryLookbackHours: 24,
-    enableWorkspaceBranchReconcileForward: false,
+    enableWorkspaceBranchReconcileForward: true,
+    enableWorkspaceDirtyQuarantineRepair: true,
     enableWorktreeRunExecution: false,
   };
 }
@@ -270,6 +274,26 @@ describe("InstanceExperimentalSettings — Conference Room Chat card (PAP-11233)
 
     expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({
       enableWorktreeRunExecution: true,
+    });
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("renders and patches the Built-in Agents experimental toggle", async () => {
+    await renderPage();
+
+    expect(container.textContent).toContain("Built-in Agents");
+    expect(container.textContent).toContain("Show Paperclip-managed built-in agent surfaces");
+
+    const toggle = container.querySelector<HTMLButtonElement>(BUILT_IN_AGENTS_TOGGLE_SELECTOR);
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+
+    await act(async () => {
+      toggle?.click();
+    });
+    await flushReact();
+
+    expect(mockInstanceSettingsApi.updateExperimental).toHaveBeenCalledWith({
+      enableBuiltInAgents: true,
     });
     expect(toggle?.getAttribute("aria-checked")).toBe("true");
   });

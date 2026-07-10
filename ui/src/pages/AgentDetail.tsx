@@ -7,6 +7,8 @@ import {
   type ClaudeLoginResult,
   type AgentPermissionUpdate,
 } from "../api/agents";
+import { builtInAgentsApi, type BuiltInManagedResourceKind } from "../api/builtInAgents";
+import { companySkillsApi } from "../api/companySkills";
 import { budgetsApi } from "../api/budgets";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -41,6 +43,10 @@ import { StarToggle } from "../components/StarToggle";
 import { Identity } from "../components/Identity";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { AgentActionButtons } from "../components/AgentActionButtons";
+import { InlineBanner } from "../components/InlineBanner";
+import { BuiltInAgentBadge } from "../components/BuiltInAgentBadges";
+import { BuiltInBundlePanel } from "../components/BuiltInBundlePanel";
+import { ConfigureBuiltInAgentModal } from "../components/ConfigureBuiltInAgentModal";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { TrustPresetSection } from "../components/TrustPresetSection";
 import { FileTree, buildFileTree } from "../components/FileTree";
@@ -95,6 +101,7 @@ import {
   responsibleUserLabel,
 } from "@paperclipai/shared";
 import { ResponsibleUserDenialNotice } from "../components/ResponsibleUserDenialNotice";
+import { RunWorkspaceRecoverySurface } from "../components/RunWorkspaceRecoverySurface";
 import { buildPermissionsForTrustPreset, getTrustPreset } from "../lib/trust-policy-ui";
 import { redactHomePathUserSegments, redactHomePathUserSegmentsInValue } from "@paperclipai/adapter-utils";
 import { agentRouteRef } from "../lib/utils";
@@ -170,6 +177,17 @@ function redactEnvValue(key: string, value: unknown, censorUsernameInLogs: boole
 
 function isMarkdown(pathValue: string) {
   return pathValue.toLowerCase().endsWith(".md");
+}
+
+function shouldUseMarkdownInstructionsEditor(input: {
+  selectedFileExists: boolean;
+  selectedPath: string;
+  detail?: { markdown?: boolean } | null;
+  summary?: { markdown?: boolean } | null;
+}) {
+  const metadataMarkdown = input.detail?.markdown ?? input.summary?.markdown;
+  if (typeof metadataMarkdown === "boolean") return metadataMarkdown;
+  return isMarkdown(input.selectedPath);
 }
 
 function formatEnvForDisplay(envValue: unknown, censorUsernameInLogs: boolean): string {
@@ -707,6 +725,80 @@ export function AgentDetail() {
     ? resourceMembershipState(membershipsQuery.data, "agent", resolvedAgentId)
     : "joined";
 
+  const { data: experimentalSettings } = useQuery({
+    queryKey: queryKeys.instance.experimentalSettings,
+    queryFn: () => instanceSettingsApi.getExperimental(),
+    enabled: !!resolvedCompanyId,
+  });
+  const builtInAgentsEnabled = experimentalSettings?.enableBuiltInAgents === true;
+  const { data: builtInStates } = useQuery({
+    queryKey: queryKeys.builtInAgents.list(resolvedCompanyId!),
+    queryFn: () => builtInAgentsApi.list(resolvedCompanyId!),
+    enabled: !!resolvedCompanyId && builtInAgentsEnabled,
+  });
+  const builtInState = builtInAgentsEnabled
+    ? builtInStates?.find((entry) => entry.agentId === resolvedAgentId) ?? null
+    : null;
+  const builtInFeatureLabel = builtInState
+    ? builtInState.definition.featureKeys
+        .map((key) => key.charAt(0).toUpperCase() + key.slice(1))
+        .join(", ")
+    : "";
+  const invalidateBuiltIn = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.builtInAgents.list(resolvedCompanyId!) });
+    if (resolvedAgentId) {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(resolvedAgentId) });
+    }
+    queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
+  }, [queryClient, resolvedCompanyId, resolvedAgentId, routeAgentRef]);
+
+  const resetBuiltIn = useMutation({
+    mutationFn: () => builtInAgentsApi.reset(resolvedCompanyId!, builtInState!.definition.key),
+    onSuccess: invalidateBuiltIn,
+  });
+
+  const [showBuiltInConfigure, setShowBuiltInConfigure] = useState(false);
+  const resetBuiltInResource = useMutation({
+    mutationFn: (kind: BuiltInManagedResourceKind) =>
+      builtInAgentsApi.reset(resolvedCompanyId!, builtInState!.definition.key, [kind]),
+    onSuccess: invalidateBuiltIn,
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : "Failed to update bundle resource");
+    },
+  });
+  const runBuiltInRoutine = useMutation({
+    mutationFn: (routineKey: string) =>
+      builtInAgentsApi.runRoutine(resolvedCompanyId!, builtInState!.definition.key, routineKey),
+    onSuccess: invalidateBuiltIn,
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : "Failed to run built-in routine");
+    },
+  });
+  const enableBuiltInSchedule = useMutation({
+    mutationFn: (routineKey: string) =>
+      builtInAgentsApi.enableRoutineSchedule(resolvedCompanyId!, builtInState!.definition.key, routineKey),
+    onSuccess: invalidateBuiltIn,
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : "Failed to enable routine schedule");
+    },
+  });
+  const disableBuiltInSchedule = useMutation({
+    mutationFn: (routineKey: string) =>
+      builtInAgentsApi.disableRoutineSchedule(resolvedCompanyId!, builtInState!.definition.key, routineKey),
+    onSuccess: invalidateBuiltIn,
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : "Failed to disable routine schedule");
+    },
+  });
+  const builtInRoutineActionPending =
+    runBuiltInRoutine.isPending
+      ? "run"
+      : enableBuiltInSchedule.isPending
+        ? "enable"
+        : disableBuiltInSchedule.isPending
+          ? "disable"
+          : null;
+
   const { data: runtimeState } = useQuery({
     queryKey: queryKeys.agents.runtimeState(resolvedAgentId ?? routeAgentRef),
     queryFn: () => agentsApi.runtimeState(resolvedAgentId!, resolvedCompanyId ?? undefined),
@@ -1022,7 +1114,10 @@ export function AgentDetail() {
             </button>
           </AgentIconPicker>
           <div className="min-w-0">
-            <h2 className="text-2xl font-bold truncate">{agent.name}</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-2xl font-bold truncate">{agent.name}</h2>
+              {builtInState && <BuiltInAgentBadge />}
+            </div>
             <p className="text-sm text-muted-foreground truncate">
               {roleLabels[agent.role] ?? agent.role}
               {agent.title ? ` - ${agent.title}` : ""}
@@ -1051,6 +1146,21 @@ export function AgentDetail() {
             workActionsDisabled={hasInvalidOrgChain}
             workActionsDisabledReason="Repair this agent's reporting chain before assigning tasks or starting runs"
             onActionError={setActionError}
+            hideTerminate={Boolean(builtInState)}
+            pauseConfirm={
+              builtInState
+                ? {
+                    title: `Pause the ${builtInState.definition.displayName}?`,
+                    description: (
+                      <>
+                        {builtInFeatureLabel} depends on this agent. While paused,{" "}
+                        {builtInFeatureLabel.toLowerCase()} generation is skipped and the{" "}
+                        {builtInFeatureLabel} page shows a warning.
+                      </>
+                    ),
+                  }
+                : undefined
+            }
           >
             {mobileLiveRun && (
               <Link
@@ -1067,6 +1177,54 @@ export function AgentDetail() {
           </AgentActionButtons>
         </div>
       </div>
+
+      {builtInState && (
+        <InlineBanner
+          tone="info"
+          title="Built-in agent"
+          actions={
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => resetBuiltIn.mutate()}
+              disabled={resetBuiltIn.isPending}
+            >
+              {resetBuiltIn.isPending ? "Resetting…" : "Reset to defaults"}
+            </Button>
+          }
+        >
+          Ships with Paperclip and powers <strong>{builtInFeatureLabel}</strong>. Configure it like
+          any agent — model, instructions, budget. It can be paused but not deleted; pausing it
+          pauses {builtInFeatureLabel}.
+        </InlineBanner>
+      )}
+
+      {builtInState?.definition.bundle && (
+        <BuiltInBundlePanel
+          state={builtInState}
+          agentRef={canonicalAgentRef}
+          onConfigure={() => setShowBuiltInConfigure(true)}
+          onResetResource={(kind) => resetBuiltInResource.mutate(kind)}
+          onRunRoutine={(routineKey) => runBuiltInRoutine.mutate(routineKey)}
+          onEnableSchedule={(routineKey) => enableBuiltInSchedule.mutate(routineKey)}
+          onDisableSchedule={(routineKey) => disableBuiltInSchedule.mutate(routineKey)}
+          resettingResource={resetBuiltInResource.isPending ? resetBuiltInResource.variables ?? null : null}
+          routineActionPending={builtInRoutineActionPending}
+        />
+      )}
+
+      {builtInState && resolvedCompanyId && (
+        <ConfigureBuiltInAgentModal
+          companyId={resolvedCompanyId}
+          state={builtInState}
+          open={showBuiltInConfigure}
+          onOpenChange={setShowBuiltInConfigure}
+          onConfigured={() => {
+            setShowBuiltInConfigure(false);
+            invalidateBuiltIn();
+          }}
+        />
+      )}
 
       {!urlRunId && (
         <Tabs
@@ -1804,7 +1962,7 @@ function ConfigurationTab({
 
 /* ---- Prompts Tab ---- */
 
-function PromptsTab({
+export function PromptsTab({
   agent,
   companyId,
   onDirtyChange,
@@ -2043,6 +2201,12 @@ function PromptsTab({
 
   const currentContent = selectedFileExists ? (selectedFileDetail?.content ?? "") : "";
   const displayValue = draft ?? currentContent;
+  const useMarkdownEditor = shouldUseMarkdownInstructionsEditor({
+    selectedFileExists,
+    selectedPath: selectedOrEntryFile,
+    detail: selectedFileDetail,
+    summary: selectedFileSummary,
+  });
   const bundleDirty = Boolean(
     bundleDraft &&
       (
@@ -2517,14 +2681,14 @@ function PromptsTab({
 
           {selectedFileExists && fileLoading && !selectedFileDetail ? (
             <PromptEditorSkeleton />
-          ) : isMarkdown(selectedOrEntryFile) ? (
+          ) : useMarkdownEditor ? (
             <MarkdownEditor
               key={selectedOrEntryFile}
               value={displayValue}
               onChange={(value) => setDraft(value ?? "")}
               placeholder="# Agent instructions"
               className="min-w-0 overflow-hidden"
-              contentClassName="min-h-(--sz-420px) max-w-full break-words text-sm font-mono"
+              contentClassName="min-h-(--sz-420px) max-w-full break-words text-sm leading-7"
               imageUploadHandler={async (file) => {
                 const namespace = `agents/${agent.id}/instructions/${selectedOrEntryFile.replaceAll("/", "-")}`;
                 const asset = await uploadMarkdownImage.mutateAsync({ file, namespace });
@@ -2903,6 +3067,10 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
 
   return (
     <div className="space-y-4 min-w-0">
+      {/* Workspace-validation recovery: surfaces the recovery card when this run was declined over a
+          git workspace it could not validate, wired to the same reconcile / repair / re-issue /
+          break-glass handlers as the task detail page. */}
+      <RunWorkspaceRecoverySurface run={run} />
       {/* Run summary card */}
       <div className="border border-border rounded-lg overflow-hidden">
         <div className="flex flex-col sm:flex-row">
