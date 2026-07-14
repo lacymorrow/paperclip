@@ -1798,6 +1798,35 @@ describe("claude execute", () => {
     }
   });
 
+  it("recovers the login URL from plain-text stdout on structured auth failures", async () => {
+    // The structured-result classifier keeps the auth keyword check blind to
+    // stream stdout, but the CLI prints its login URL as a plain-text stdout
+    // line — the URL must still surface in errorMeta.loginUrl.
+    const result = await executeWithClaudeCommand(
+      "run-claude-auth-login-url",
+      "paperclip-claude-execute-auth-url-",
+      async (commandPath) => {
+        const resultEvent = JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          session_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          is_error: true,
+          result: "Invalid API key · Please run /login",
+        });
+        const script = `#!/usr/bin/env node
+console.log("Visit https://console.anthropic.com/login to authenticate.");
+console.log(${JSON.stringify(resultEvent)});
+process.exit(1);
+`;
+        await fs.writeFile(commandPath, script, "utf8");
+        await fs.chmod(commandPath, 0o755);
+      },
+    );
+
+    expect(result.errorCode).toBe("claude_auth_required");
+    expect(result.errorMeta?.loginUrl).toBe("https://console.anthropic.com/login");
+  });
+
   it("auto-rotates session on previous_message_id 400 (synthetic-msg poisoning) and succeeds on retry", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-exec-poisoned-msgid-"));
     const { workspace, commandPath, capturePath, statePath, restore } = await setupExecuteEnv(root, {

@@ -506,13 +506,17 @@ function isRetryableInteractionContinuationInfrastructureFailure(
 // labelled. Guards against classifier regressions that mis-coded successful
 // heartbeats claude_transient_upstream and chained full-cost retries.
 // Prefers the adapter-agnostic `adapterSucceeded` flag persisted at
-// finalization; falls back to the raw Claude result-event fields for rows
-// written before that flag existed.
+// finalization; falls back to the raw Claude result-event fields for
+// claude_local rows written before that flag existed. The fallback is scoped
+// to claude_local because other local adapters share the stream-json result
+// shape, and their rows must keep existing retry behaviour.
 function isAdapterReportedSuccessRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "resultJson">,
+  agent: Pick<typeof agents.$inferSelect, "adapterType">,
 ) {
   const resultJson = parseObject(run.resultJson);
   if (resultJson.adapterSucceeded === true) return true;
+  if (agent.adapterType !== "claude_local") return false;
   const subtype = readNonEmptyString(resultJson.subtype)?.trim().toLowerCase();
   return subtype === "success" && resultJson.is_error !== true && resultJson.is_error !== "true";
 }
@@ -9531,7 +9535,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const now = opts?.now ?? new Date();
     const retryReason = opts?.retryReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
     const wakeReason = opts?.wakeReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON;
-    if (retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON && isAdapterReportedSuccessRun(run)) {
+    if (retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON && isAdapterReportedSuccessRun(run, agent)) {
       const reason =
         "Transient retry suppressed because the adapter reported a successful structured result";
       await appendRunEvent(run, await nextRunEventSeq(run.id), {

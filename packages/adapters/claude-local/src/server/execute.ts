@@ -59,6 +59,7 @@ import {
   parseClaudeStreamJson,
   describeClaudeFailure,
   detectClaudeLoginRequired,
+  extractClaudeLoginUrl,
   extractClaudeRetryNotBefore,
   isClaudeMaxTurnsResult,
   isClaudeProviderQuotaError,
@@ -1107,9 +1108,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // stream stdout — and only when the run actually failed. Successful runs
     // whose final message merely mentioned auth or rate limits were previously
     // mis-coded claude_auth_required / claude_transient_upstream.
-    const loginMeta = failed
+    const detectedLogin = failed
       ? detectClaudeLoginRequired({ parsed, stdout: "", stderr: proc.stderr })
       : { requiresLogin: false, loginUrl: null };
+    // The keyword check above stays blind to stream stdout (agent conversation
+    // text), but the CLI prints its login URL as a plain-text stdout line
+    // outside the stream-json events, so recover the URL from the stripped
+    // stdout when auth is actually required.
+    const loginMeta =
+      detectedLogin.requiresLogin && detectedLogin.loginUrl == null
+        ? {
+            ...detectedLogin,
+            loginUrl: extractClaudeLoginUrl(
+              [stripClaudeStreamEventLines(proc.stdout), proc.stderr].join("\n"),
+            ),
+          }
+        : detectedLogin;
     const errorMeta =
       loginMeta.loginUrl != null ? { loginUrl: loginMeta.loginUrl } : undefined;
     const providerQuota =
