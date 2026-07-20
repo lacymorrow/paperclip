@@ -1702,6 +1702,7 @@ function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   issueStatus: string | null | undefined;
   assigneeAgentId: string | null | undefined;
   actorType: "agent" | "user";
+  actorSource: string;
   actorId: string;
   actorRunId: string | null | undefined;
   checkoutRunId: string | null | undefined;
@@ -1720,6 +1721,14 @@ function shouldImplicitlyMoveCommentedIssueToTodo(input: {
   ) {
     return false;
   }
+  // The implicit local-trusted sentinel (`local-board`) is not provably human:
+  // agents post through the local board subprocess, and those relayed comments
+  // regularly land after the owning run completed and released the issue, so
+  // the run-id guard above cannot catch them — every close-out comment then
+  // reopened the issue and wake-looped it (LAC-2882). The board UI sends an
+  // explicit `reopen: true` for genuine human reopens, so suppressing the
+  // implicit move for this sentinel loses nothing for real board users.
+  if (input.actorSource === "local_implicit") return false;
   // Only human comments should implicitly reopen finished work.
   // Agent-authored comments remain communicative unless reopen was explicit.
   if (input.actorType !== "user") return false;
@@ -7061,6 +7070,7 @@ export function issueRoutes(
             issueStatus: existing.status,
             assigneeAgentId: requestedAssigneeAgentId,
             actorType: actor.actorType,
+            actorSource: actor.actorSource,
             actorId: actor.actorId,
             actorRunId: actor.runId,
             checkoutRunId: existing.checkoutRunId,
@@ -8966,6 +8976,7 @@ export function issueRoutes(
           issueStatus: issue.status,
           assigneeAgentId: issue.assigneeAgentId,
           actorType: actor.actorType,
+          actorSource: actor.actorSource,
           actorId: actor.actorId,
           actorRunId: actor.runId,
           checkoutRunId: issue.checkoutRunId,
