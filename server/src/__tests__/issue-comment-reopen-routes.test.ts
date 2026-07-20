@@ -178,13 +178,7 @@ async function installActor(app: express.Express, actor?: Record<string, unknown
     import("../middleware/index.js"),
   ]);
   app.use((req, _res, next) => {
-    (req as any).actor = actor ?? {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor ?? localBoardSentinelActor();
     next();
   });
   app.use("/api", issueRoutes(mockDb as any, {} as any));
@@ -235,6 +229,18 @@ function sessionUserActor(userId = "user-1") {
     companyIds: ["company-1"],
     source: "session",
     isInstanceAdmin: false,
+  };
+}
+
+// The local-trusted sentinel that agent relay comments post under.
+function localBoardSentinelActor(runId?: string) {
+  return {
+    type: "board",
+    userId: "local-board",
+    companyIds: ["company-1"],
+    source: "local_implicit",
+    isInstanceAdmin: false,
+    ...(runId ? { runId } : {}),
   };
 }
 
@@ -578,14 +584,7 @@ describe.sequential("issue comment reopen routes", () => {
       executionRunId: null,
     });
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-already-finished",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-already-finished")))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "PR merged, deployed, verified. Closing." });
 
@@ -1190,14 +1189,7 @@ describe.sequential("issue comment reopen routes", () => {
       executionRunId: null,
     });
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-same-as-actor",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-same-as-actor")))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "Done — final note from the run that owns the issue" });
 
@@ -1215,14 +1207,7 @@ describe.sequential("issue comment reopen routes", () => {
       executionRunId: "run-same-as-actor",
     });
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-same-as-actor",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-same-as-actor")))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "Done — note from the still-active execution run" });
 
@@ -1245,14 +1230,7 @@ describe.sequential("issue comment reopen routes", () => {
       executionRunId: "run-owning",
     });
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-different",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-different")))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "Follow-up note from a later run" });
 
@@ -1275,14 +1253,7 @@ describe.sequential("issue comment reopen routes", () => {
       ...patch,
     }));
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-same-as-actor",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-same-as-actor")))
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
       .send({ comment: "Done — final note from the run that owns the issue" });
 
