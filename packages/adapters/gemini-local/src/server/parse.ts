@@ -200,10 +200,10 @@ export function parseGeminiJsonl(stdout: string) {
     resultEvent,
     question,
     // Structured success: the stream emitted a result event that did not
-    // report an error. Authoritative when true — the process exit code may
-    // still be nonzero when terminal-result cleanup SIGTERMs the CLI after a
-    // successful result.
-    succeeded: resultEvent != null && !resultEventIsError,
+    // report an error, and no error/system-error event set an error message.
+    // Authoritative when true — the process exit code may still be nonzero
+    // when terminal-result cleanup SIGTERMs the CLI after a successful result.
+    succeeded: resultEvent != null && !resultEventIsError && errorMessage == null,
   };
 }
 

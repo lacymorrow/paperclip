@@ -277,4 +277,12 @@ describe("parseGeminiJsonl succeeded", () => {
     );
     expect(parsed.succeeded).toBe(false);
   });
+
+  it("does not report success when an error event was emitted", () => {
+    const parsed = parseGeminiJsonl([
+      JSON.stringify({ type: "error", message: "stream error" }),
+      JSON.stringify({ type: "result", subtype: "success", session_id: "gemini-1", result: "ok" }),
+    ].join("\n"));
+    expect(parsed.succeeded).toBe(false);
+  });
 });
