@@ -12922,12 +12922,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
         // Only human/comment-reopen interactions should revive completed issues;
         // system follow-ups such as retry or cleanup wakes must not reopen closed work.
+        // The local-trusted sentinel (`local-board`) relays agent comments under user
+        // auth, so a "user" deferred wake it requested is not provably human — without
+        // this carve-out every relayed close-out comment reopened the issue when the
+        // deferred wake landed after the close (LAC-2882). Explicit reopens still
+        // arrive as wakeReason "issue_reopened_via_comment".
+        const deferredRequestedByActorSource = readNonEmptyString(
+          deferredContextSeed.requestedByActorSource,
+        );
         const shouldReopenDeferredCommentWake =
           deferredCommentIds.length > 0 &&
           !deferredCommentWakeIsSelfAuthored &&
           (issue.status === "done" || issue.status === "cancelled") &&
           (
-            deferred.requestedByActorType === "user" ||
+            (
+              deferred.requestedByActorType === "user" &&
+              deferredRequestedByActorSource !== "local_implicit"
+            ) ||
             deferredWakeReason === "issue_reopened_via_comment"
           );
         let reopenedActivity: LogActivityInput | null = null;
