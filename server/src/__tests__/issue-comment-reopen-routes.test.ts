@@ -1320,6 +1320,44 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
+  // LAC-2882 third incident: a run closes its issue via PATCH {status: done,
+  // comment} relayed through the sentinel. The pre-mutation status is open, so
+  // an issue_commented wake is enqueued and later deferred past the close. The
+  // heartbeat promoter only suppresses the reopen when the wake context carries
+  // requestedByActorSource "local_implicit" — pin that propagation here.
+  it("stamps local_implicit actor source on the wake from a sentinel PATCH close-with-comment", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("in_progress"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("in_progress"),
+      ...patch,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done", comment: "Close-out summary" });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ status: "done" }),
+    );
+    await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        reason: "issue_commented",
+        contextSnapshot: expect.objectContaining({
+          wakeCommentId: "comment-1",
+          wakeReason: "issue_commented",
+          requestedByActorSource: "local_implicit",
+        }),
+      }),
+    ));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+    );
+  });
+
   it("moves in-progress issues with a scheduled retry back to todo via the PATCH comment path", async () => {
     const issue = {
       ...makeIssue("in_progress"),
