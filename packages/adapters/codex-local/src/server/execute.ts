@@ -1028,8 +1028,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         parsedError ||
         stderrLine ||
         `Codex exited with code ${attempt.proc.exitCode ?? -1}`;
+      // A structured completed turn is authoritative success even when the
+      // process exit code is nonzero (terminal-result cleanup SIGTERMs the CLI
+      // after a successful turn), and classification runs only on actual
+      // failure. The classifiers themselves strip JSONL event lines from
+      // stdout, so the agent conversation — which routinely discusses rate
+      // limits, auth, and retries — never reaches the keyword matchers.
+      const parsedSucceeded = attempt.parsed.succeeded === true;
+      const failed = !parsedSucceeded && (attempt.proc.exitCode ?? 0) !== 0;
       const transientRetryNotBefore =
-        (attempt.proc.exitCode ?? 0) !== 0
+        failed
           ? extractCodexRetryNotBefore({
               stdout: attempt.proc.stdout,
               stderr: attempt.proc.stderr,
@@ -1037,14 +1045,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             })
           : null;
       const providerQuota =
-        (attempt.proc.exitCode ?? 0) !== 0 &&
+        failed &&
         isCodexProviderQuotaError({
           stdout: attempt.proc.stdout,
           stderr: attempt.proc.stderr,
           errorMessage: fallbackErrorMessage,
         });
       const transientUpstream =
-        (attempt.proc.exitCode ?? 0) !== 0 &&
+        failed &&
         !providerQuota &&
         isCodexTransientUpstreamError({
           stdout: attempt.proc.stdout,
@@ -1057,10 +1065,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: attempt.proc.exitCode,
         signal: attempt.proc.signal,
         timedOut: false,
-        errorMessage:
-          (attempt.proc.exitCode ?? 0) === 0
-            ? null
-            : fallbackErrorMessage,
+        succeeded: parsedSucceeded,
+        errorMessage: failed ? fallbackErrorMessage : null,
         errorCode:
           providerQuota
             ? "provider_quota"
@@ -1097,7 +1103,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         sessionId &&
         !initial.proc.timedOut &&
         (initial.proc.exitCode ?? 0) !== 0 &&
-        isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
+        isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr, initial.parsed.errorMessage)
       ) {
         await onLog(
           "stdout",
