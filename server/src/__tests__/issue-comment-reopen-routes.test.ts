@@ -178,13 +178,7 @@ async function installActor(app: express.Express, actor?: Record<string, unknown
     import("../middleware/index.js"),
   ]);
   app.use((req, _res, next) => {
-    (req as any).actor = actor ?? {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-    };
+    (req as any).actor = actor ?? localBoardSentinelActor();
     next();
   });
   app.use("/api", issueRoutes(mockDb as any, {} as any));
@@ -223,6 +217,30 @@ function agentActor(agentId = "22222222-2222-4222-8222-222222222222") {
     companyId: "company-1",
     source: "agent_key",
     runId: "run-1",
+  };
+}
+
+// A genuine authenticated human (board session), as opposed to the
+// `local-board` local_implicit sentinel that agent relay comments post under.
+function sessionUserActor(userId = "user-1") {
+  return {
+    type: "board",
+    userId,
+    companyIds: ["company-1"],
+    source: "session",
+    isInstanceAdmin: false,
+  };
+}
+
+// The local-trusted sentinel that agent relay comments post under.
+function localBoardSentinelActor(runId?: string) {
+  return {
+    type: "board",
+    userId: "local-board",
+    companyIds: ["company-1"],
+    source: "local_implicit",
+    isInstanceAdmin: false,
+    ...(runId ? { runId } : {}),
   };
 }
 
@@ -395,14 +413,14 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("implicitly reopens closed issues via the PATCH comment path when reassigning to an agent", async () => {
+  it("implicitly reopens closed issues via the PATCH comment path when a human session reassigns to an agent", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("done"),
       ...patch,
     }));
 
-    const res = await request(await installActor(createApp()))
+    const res = await request(await installActor(createApp(), sessionUserActor()))
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
       .send({ comment: "hello", assigneeAgentId: "33333333-3333-4333-8333-333333333333" });
 
@@ -413,7 +431,7 @@ describe.sequential("issue comment reopen routes", () => {
         assigneeAgentId: "33333333-3333-4333-8333-333333333333",
         status: "todo",
         actorAgentId: null,
-        actorUserId: "local-board",
+        actorUserId: "user-1",
       }),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
@@ -507,14 +525,14 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("implicitly reopens closed issues via POST comments when an agent is assigned", async () => {
+  it("implicitly reopens closed issues via POST comments when a human session comments and an agent is assigned", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("done"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("done"),
       ...patch,
     }));
 
-    const res = await request(await installActor(createApp()))
+    const res = await request(await installActor(createApp(), sessionUserActor()))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "hello" });
 
@@ -532,6 +550,67 @@ describe.sequential("issue comment reopen routes", () => {
         }),
       }),
     ));
+  });
+
+  // LAC-2882 regression: agent comments relayed through the local board
+  // subprocess post as the `local-board` local_implicit sentinel, usually after
+  // the owning run finished — a plain comment on a done issue must attach
+  // without flipping the status back to todo.
+  it("keeps plain local-board sentinel POST comments on done issues inert", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+
+    const res = await request(await installActor(createApp()))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Closed out. Final summary attached." });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).not.toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ status: "todo" }),
+    );
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+    );
+  });
+
+  // LAC-2875 incident shape: the close-out comment lands after the run
+  // completed and the checkout was released, so the run-id match guard cannot
+  // suppress the move — the sentinel guard must.
+  it("keeps local-board sentinel POST comments with a stale runId inert after the owning run released the issue", async () => {
+    mockIssueService.getById.mockResolvedValue({
+      ...makeIssue("done"),
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-already-finished")))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "PR merged, deployed, verified. Closing." });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).not.toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ status: "todo" }),
+    );
+  });
+
+  it("explicit reopen=true from the local-board sentinel still reopens done issues via POST comments", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("done"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("done"),
+      ...patch,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
+      .send({ body: "Please take another pass.", reopen: true });
+
+    expect(res.status).toBe(201);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      { status: "todo" },
+    );
   });
 
   it("rejects non-assignee agent POST comments on closed issues", async () => {
@@ -815,14 +894,14 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("moves assigned blocked issues back to todo via POST comments", async () => {
+  it("moves assigned blocked issues back to todo via POST human session comments", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("blocked"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("blocked"),
       ...patch,
     }));
 
-    const res = await request(await installActor(createApp()))
+    const res = await request(await installActor(createApp(), sessionUserActor()))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "please continue" });
 
@@ -1110,14 +1189,7 @@ describe.sequential("issue comment reopen routes", () => {
       executionRunId: null,
     });
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-same-as-actor",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-same-as-actor")))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "Done — final note from the run that owns the issue" });
 
@@ -1135,14 +1207,7 @@ describe.sequential("issue comment reopen routes", () => {
       executionRunId: "run-same-as-actor",
     });
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-same-as-actor",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-same-as-actor")))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
       .send({ body: "Done — note from the still-active execution run" });
 
@@ -1153,32 +1218,26 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("still implicitly reopens done issues via POST comments when the comment runId differs from the issue's owning run", async () => {
+  // Previously a differing runId was read as "real human follow-up" and
+  // implicitly reopened — but relayed agent comments also arrive with a runId
+  // that no longer matches the (released) checkout, so the sentinel comment
+  // must stay inert either way (LAC-2882). Humans reopen via explicit
+  // reopen/resume, which the board UI already sends.
+  it("keeps local-board sentinel POST comments inert even when the comment runId differs from the issue's owning run", async () => {
     mockIssueService.getById.mockResolvedValue({
       ...makeIssue("done"),
       checkoutRunId: "run-owning",
       executionRunId: "run-owning",
     });
-    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-      ...makeIssue("done"),
-      ...patch,
-    }));
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-different",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-different")))
       .post("/api/issues/11111111-1111-4111-8111-111111111111/comments")
-      .send({ body: "Real human follow-up — please reopen" });
+      .send({ body: "Follow-up note from a later run" });
 
     expect(res.status).toBe(201);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
+    expect(mockIssueService.update).not.toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
-      { status: "todo" },
+      expect.objectContaining({ status: "todo" }),
     );
   });
 
@@ -1194,14 +1253,7 @@ describe.sequential("issue comment reopen routes", () => {
       ...patch,
     }));
 
-    const res = await request(await installActor(createApp(), {
-      type: "board",
-      userId: "local-board",
-      companyIds: ["company-1"],
-      source: "local_implicit",
-      isInstanceAdmin: false,
-      runId: "run-same-as-actor",
-    }))
+    const res = await request(await installActor(createApp(), localBoardSentinelActor("run-same-as-actor")))
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
       .send({ comment: "Done — final note from the run that owns the issue" });
 
@@ -1212,14 +1264,14 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("moves assigned blocked issues back to todo via the PATCH comment path", async () => {
+  it("moves assigned blocked issues back to todo via the PATCH human session comment path", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue("blocked"));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue("blocked"),
       ...patch,
     }));
 
-    const res = await request(await installActor(createApp()))
+    const res = await request(await installActor(createApp(), sessionUserActor()))
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
       .send({ comment: "please continue" });
 
@@ -1229,9 +1281,10 @@ describe.sequential("issue comment reopen routes", () => {
       expect.objectContaining({
         status: "todo",
         actorAgentId: null,
-        actorUserId: "local-board",
+        actorUserId: "user-1",
       }),
     );
+
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
       expect.objectContaining({
@@ -1243,6 +1296,66 @@ describe.sequential("issue comment reopen routes", () => {
         }),
       }),
     ));
+  });
+
+  it("keeps plain local-board sentinel PATCH comments on blocked issues inert", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("blocked"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("blocked"),
+      ...patch,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ comment: "status note while blocked" });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).not.toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ status: "todo" }),
+    );
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+    );
+  });
+
+  // LAC-2882 third incident: a run closes its issue via PATCH {status: done,
+  // comment} relayed through the sentinel. The pre-mutation status is open, so
+  // an issue_commented wake is enqueued and later deferred past the close. The
+  // heartbeat promoter only suppresses the reopen when the wake context carries
+  // requestedByActorSource "local_implicit" — pin that propagation here.
+  it("stamps local_implicit actor source on the wake from a sentinel PATCH close-with-comment", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("in_progress"));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue("in_progress"),
+      ...patch,
+    }));
+
+    const res = await request(await installActor(createApp()))
+      .patch("/api/issues/11111111-1111-4111-8111-111111111111")
+      .send({ status: "done", comment: "Close-out summary" });
+
+    expect(res.status).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.objectContaining({ status: "done" }),
+    );
+    await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
+      "22222222-2222-4222-8222-222222222222",
+      expect.objectContaining({
+        reason: "issue_commented",
+        contextSnapshot: expect.objectContaining({
+          wakeCommentId: "comment-1",
+          wakeReason: "issue_commented",
+          requestedByActorSource: "local_implicit",
+        }),
+      }),
+    ));
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ reason: "issue_reopened_via_comment" }),
+    );
   });
 
   it("moves in-progress issues with a scheduled retry back to todo via the PATCH comment path", async () => {
