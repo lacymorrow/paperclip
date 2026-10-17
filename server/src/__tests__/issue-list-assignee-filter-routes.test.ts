@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, companyMemberships, createDb, heartbeatRuns, issues, principalPermissionGrants } from "@paperclipai/db";
+import { agents, companies, companyMemberships, createDb, heartbeatRuns, issueRelations, issues, principalPermissionGrants } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -238,6 +238,84 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
     expect("executionPolicy" in row).toBe(false);
     expect("executionState" in row).toBe(false);
     expect("executionWorkspaceSettings" in row).toBe(false);
+  });
+
+  it("echoes blockedByIssueIds wherever a list row carries blockedBy", async () => {
+    const companyId = randomUUID();
+    const blockerIssueId = randomUUID();
+    const blockedIssueId = randomUUID();
+    const unblockedIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: uniqueIssuePrefix(),
+      requireBoardApprovalForNewAgents: false,
+    });
+    await seedCloudTenantMember(companyId);
+    await db.insert(issues).values([
+      {
+        id: blockerIssueId,
+        companyId,
+        title: "Blocker",
+        status: "todo",
+        priority: "high",
+      },
+      {
+        id: blockedIssueId,
+        companyId,
+        title: "Blocked by the blocker",
+        status: "blocked",
+        priority: "medium",
+      },
+      {
+        id: unblockedIssueId,
+        companyId,
+        title: "Nothing blocking this one",
+        status: "todo",
+        priority: "medium",
+      },
+    ]);
+    // blocker blocks blocked, which is how `blockedByMapForIssues` reads the edge.
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerIssueId,
+      relatedIssueId: blockedIssueId,
+      type: "blocks",
+    });
+
+    const app = createApp(companyId);
+    const createdId = blockedIssueId;
+
+    // Both list shapes that hydrate the graph: the blocked-issue endpoint an agent hits
+    // first when diagnosing a wedge, and the explicit opt-in flag.
+    for (const query of [
+      { attention: "blocked", includeBlockedBy: "true", limit: "20" },
+      { status: "blocked", includeBlockedBy: "true", limit: "20" },
+    ]) {
+      const res = await request(app)
+        .get(`/api/companies/${companyId}/issues`)
+        .query(query);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const row = (res.body as Array<Record<string, unknown>>).find((item) => item.id === createdId);
+      expect(row, `${JSON.stringify(query)} did not return the blocked issue`).toBeDefined();
+      // A row that carries the graph must carry the echo, and they must agree. Emitting
+      // `blockedBy` alone leaves the real blocker visible in a field callers are not told
+      // to read, while the field they are told to read looks empty (LAC-4464).
+      expect(row!.blockedBy).toEqual([expect.objectContaining({ id: blockerIssueId })]);
+      expect(row!.blockedByIssueIds).toEqual([blockerIssueId]);
+    }
+
+    // Absent on both sides is honest: no graph loaded, nothing to echo.
+    const withoutFlag = await request(app)
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ status: "todo", limit: "20" });
+    expect(withoutFlag.status, JSON.stringify(withoutFlag.body)).toBe(200);
+    const plainRow = (withoutFlag.body as Array<Record<string, unknown>>)
+      .find((item) => item.id === unblockedIssueId)!;
+    expect("blockedBy" in plainRow).toBe(false);
+    expect("blockedByIssueIds" in plainRow).toBe(false);
   });
 
   it("returns 422 for malformed assigneeAgentId filters", async () => {

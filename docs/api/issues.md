@@ -30,7 +30,12 @@ create dropped the field. `GET /api/issues/{issueId}` returns the real values.
 
 Blocker state is summarised on every list row as `blockerAttention`, which includes
 `unresolvedBlockerCount`, `sampleBlockerIdentifier` and `terminalBlocker`. That is enough
-to find a wedged issue; the full graph needs the issue endpoint.
+to find a wedged issue without asking for more.
+
+The graph itself is opt-in: pass `includeBlockedBy=true`, or use `attention=blocked`, and
+each row carries `blockedBy` plus the matching `blockedByIssueIds`. Without that flag both
+keys are absent, which means "not loaded, ask the issue endpoint" and never "no blockers".
+The two always travel together, so a row that has one has the other.
 
 ## Get Issue
 

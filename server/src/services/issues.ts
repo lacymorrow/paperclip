@@ -63,7 +63,7 @@ import {
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
-import { blockedByIssueIdsFromRelations } from "./issue-list-projection.js";
+import { blockedByIssueIdsFromRelations, issueBlockedByFields } from "./issue-list-projection.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
 import {
@@ -3567,7 +3567,7 @@ async function listBlockedInboxIssues(
     return [{
       ...row,
       description: blockedInboxResponseDescription(blockedInboxAttention, row),
-      blockedBy: blockedByMap.get(row.id) ?? [],
+      ...issueBlockedByFields(blockedByMap.get(row.id) ?? []),
       lastActivityAt,
       ...(blockerAttentionByIssueId.has(row.id) ? { blockerAttention: blockerAttentionByIssueId.get(row.id) } : {}),
       blockedInboxAttention,
@@ -4816,7 +4816,7 @@ export function issueService(db: Db) {
           ) ?? row.updatedAt;
           return {
             ...row,
-            ...(includeBlockedBy ? { blockedBy: blockedByMap.get(row.id) ?? [] } : {}),
+            ...(includeBlockedBy ? issueBlockedByFields(blockedByMap.get(row.id) ?? []) : {}),
             lastActivityAt,
             ...(blockerAttentionByIssueId.has(row.id) ? { blockerAttention: blockerAttentionByIssueId.get(row.id) } : {}),
             ...(includeBlockedInboxAttention ? { blockedInboxAttention: blockedInboxAttentionByIssueId.get(row.id) ?? null } : {}),
@@ -4839,7 +4839,7 @@ export function issueService(db: Db) {
         ) ?? row.updatedAt;
         return {
           ...row,
-          ...(includeBlockedBy ? { blockedBy: blockedByMap.get(row.id) ?? [] } : {}),
+          ...(includeBlockedBy ? issueBlockedByFields(blockedByMap.get(row.id) ?? []) : {}),
           lastActivityAt,
           ...(blockerAttentionByIssueId.has(row.id) ? { blockerAttention: blockerAttentionByIssueId.get(row.id) } : {}),
           ...(includeBlockedInboxAttention ? { blockedInboxAttention: blockedInboxAttentionByIssueId.get(row.id) ?? null } : {}),

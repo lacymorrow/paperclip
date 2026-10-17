@@ -44,3 +44,21 @@ export function omitUnloadedIssueListFields<T extends object>(row: T): Omit<T, I
 export function blockedByIssueIdsFromRelations(blockedBy: readonly { id: string }[]): string[] {
   return blockedBy.map((relation) => relation.id);
 }
+
+/**
+ * Emit `blockedBy` and its echo as one object. Anywhere a row is built by hand, spread
+ * this instead of setting `blockedBy` directly, so a row cannot carry the graph without
+ * the echo.
+ *
+ * That split is not hypothetical. The first cut of this work echoed the ids at the issue
+ * endpoints and left the three list hydration sites alone, so
+ * `GET /api/companies/{id}/issues?attention=blocked` still answered with a real blocker in
+ * `blockedBy` and nothing in the field callers are told to read: the precise shape the
+ * change set out to remove, on the endpoint an agent diagnosing a wedged issue hits first
+ * (LAC-4464, caught in review on #35).
+ */
+export function issueBlockedByFields<T extends { id: string }>(
+  blockedBy: T[],
+): { blockedBy: T[]; blockedByIssueIds: string[] } {
+  return { blockedBy, blockedByIssueIds: blockedByIssueIdsFromRelations(blockedBy) };
+}
