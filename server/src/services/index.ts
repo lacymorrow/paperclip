@@ -22,6 +22,11 @@ export {
   issueService,
   type IssueFilters,
 } from "./issues.js";
+export {
+  blockedByIssueIdsFromRelations,
+  ISSUE_LIST_UNLOADED_FIELDS,
+  omitUnloadedIssueListFields,
+} from "./issue-list-projection.js";
 export { issueThreadInteractionService } from "./issue-thread-interactions.js";
 export { issueTreeControlService } from "./issue-tree-control.js";
 export { issueApprovalService } from "./issue-approvals.js";

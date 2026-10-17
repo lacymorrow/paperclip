@@ -150,6 +150,10 @@ import {
   ISSUE_WAKE_DIAGNOSTICS_MAX_WAKE_REQUESTS,
   readAcceptedPlanConfirmationTarget,
 } from "../services/issues.js";
+import {
+  blockedByIssueIdsFromRelations,
+  omitUnloadedIssueListFields,
+} from "../services/issue-list-projection.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { environmentService } from "../services/environments.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
@@ -4231,7 +4235,7 @@ export function issueRoutes(
       else recoveryActionByIssue.delete(issue.id);
     }));
     res.json(result.map((issue) => ({
-      ...issue,
+      ...omitUnloadedIssueListFields(issue),
       successfulRunHandoff: handoffStates.get(issue.id) ?? null,
       activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
     })));
@@ -4476,6 +4480,7 @@ export function issueRoutes(
         goalId: goal?.id ?? issue.goalId,
         parentId: issue.parentId,
         blockedBy: relationsWithRecoveryActions.blockedBy,
+        blockedByIssueIds: blockedByIssueIdsFromRelations(relationsWithRecoveryActions.blockedBy),
         blocks: relationsWithRecoveryActions.blocks,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
@@ -4739,6 +4744,7 @@ export function issueRoutes(
       scheduledRetry,
       activeRecoveryAction: revalidatedActiveRecoveryAction,
       blockedBy: relationsWithRecoveryActions.blockedBy,
+      blockedByIssueIds: blockedByIssueIdsFromRelations(relationsWithRecoveryActions.blockedBy),
       blocks: relationsWithRecoveryActions.blocks,
       relatedWork: referenceSummary,
       referencedIssueIdentifiers: referenceSummary.outbound.map((item) => item.issue.identifier ?? item.issue.id),
@@ -7388,6 +7394,7 @@ export function issueRoutes(
       : null;
     let issueResponse: typeof issue & {
       blockedBy?: unknown;
+      blockedByIssueIds?: string[];
       blocks?: unknown;
       activeRecoveryAction?: unknown;
       relatedWork?: Awaited<ReturnType<typeof issueReferencesSvc.listIssueReferenceSummary>>;
@@ -7399,6 +7406,7 @@ export function issueRoutes(
       issueResponse = {
         ...issue,
         blockedBy: updatedRelations.blockedBy,
+        blockedByIssueIds: blockedByIssueIdsFromRelations(updatedRelations.blockedBy),
         blocks: updatedRelations.blocks,
       };
     }

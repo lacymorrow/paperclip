@@ -52,6 +52,7 @@ import {
   syncInstructionsBundleConfigFromFilePath,
   workspaceOperationService,
 } from "../services/index.js";
+import { omitUnloadedIssueListFields } from "../services/issue-list-projection.js";
 import { conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
 import {
@@ -2003,7 +2004,7 @@ export function agentRoutes(
       limit: ISSUE_LIST_DEFAULT_LIMIT,
     });
 
-    res.json(rows);
+    res.json(rows.map(omitUnloadedIssueListFields));
   });
 
   router.get("/agents/:id", async (req, res) => {

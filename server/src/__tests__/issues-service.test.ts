@@ -37,6 +37,10 @@ import {
   issueService,
 } from "../services/issues.ts";
 import {
+  ISSUE_LIST_UNLOADED_FIELDS,
+  omitUnloadedIssueListFields,
+} from "../services/issue-list-projection.ts";
+import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
@@ -3408,6 +3412,48 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       priority: "high",
     }));
     expect(created.blocks).toEqual([]);
+    // The field a caller writes is a field it can read back: `blockedByIssueIds` is
+    // echoed from the same relation array, so a missing key never reads as "no
+    // blockers" (LAC-4464).
+    expect(created.blockedByIssueIds).toEqual([blockerId]);
+  });
+
+  it("omits unloaded execution fields from list rows instead of reporting them as null", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "QA: gated behind the board",
+      status: "todo",
+      priority: "medium",
+      executionPolicy: {
+        stages: [{ type: "approval", participants: [{ type: "user", userId: "local-board" }] }],
+      },
+    });
+
+    const [listRow] = await svc.list(companyId);
+    expect(listRow?.id).toBe(issueId);
+
+    const payloadRow = omitUnloadedIssueListFields(listRow!);
+    for (const field of ISSUE_LIST_UNLOADED_FIELDS) {
+      // Absent, not null. A null here reads as "this issue has no approval gate", and an
+      // agent acted on exactly that reading (LAC-4464).
+      expect(field in payloadRow).toBe(false);
+    }
+    expect(payloadRow.id).toBe(issueId);
+    expect(payloadRow.title).toBe("QA: gated behind the board");
+
+    // The policy itself is untouched; it is just not carried by the list projection.
+    const full = await svc.getById(issueId);
+    expect(full?.executionPolicy).not.toBeNull();
   });
 
   it("returns blocked-by summaries on newly created child issues", async () => {

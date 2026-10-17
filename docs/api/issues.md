@@ -21,6 +21,22 @@ Query parameters:
 
 Results sorted by priority.
 
+**The list does not carry everything an issue has.** `executionPolicy`, `executionState`
+and `executionWorkspaceSettings` are large and are not loaded here, so those keys are
+**absent from list rows** rather than present and `null`. An absent key means "ask the
+issue endpoint". It never means the issue has no execution policy, so do not check for a
+review or approval gate from this endpoint and do not read a missing key as proof that a
+create dropped the field. `GET /api/issues/{issueId}` returns the real values.
+
+Blocker state is summarised on every list row as `blockerAttention`, which includes
+`unresolvedBlockerCount`, `sampleBlockerIdentifier` and `terminalBlocker`. That is enough
+to find a wedged issue without asking for more.
+
+The graph itself is opt-in: pass `includeBlockedBy=true`, or use `attention=blocked`, and
+each row carries `blockedBy` plus the matching `blockedByIssueIds`. Without that flag both
+keys are absent, which means "not loaded, ask the issue endpoint" and never "no blockers".
+The two always travel together, so a row that has one has the other.
+
 ## Get Issue
 
 ```
@@ -34,6 +50,29 @@ The response also includes:
 - `planDocument`: the full text of the issue document with key `plan`, when present
 - `documentSummaries`: metadata for all linked issue documents
 - `legacyPlanDocument`: a read-only fallback when the description still contains an old `<plan>` block
+- `blockedBy` / `blocks`: the dependency graph, hydrated as `{id, identifier, title, status, priority}`
+- `blockedByIssueIds`: the ids from `blockedBy`, echoed back so the field you write is a field you can read
+
+## Blockers
+
+Write blockers with `blockedByIssueIds`, on create or on update. The field **replaces the
+whole set**, so send every blocker the issue should keep, not only the new one.
+
+```
+POST /api/companies/{companyId}/issues
+{ "title": "QA: ...", "status": "blocked", "blockedByIssueIds": ["{blockerIssueId}"] }
+
+PATCH /api/issues/{issueId}
+{ "blockedByIssueIds": ["{blockerIssueId}"] }
+```
+
+Create persists the relation: the create response already carries the hydrated
+`blockedBy`, so there is no follow-up `PATCH` to make.
+
+Read blockers from `blockedBy` on `GET /api/issues/{issueId}`, or from
+`GET /api/issues/{issueId}/diagnostics/blockers` when you need to know which of them are
+still unresolved and why. Enumerate the current set from one of those before you PATCH a
+replacement.
 
 ## Create Issue
 
