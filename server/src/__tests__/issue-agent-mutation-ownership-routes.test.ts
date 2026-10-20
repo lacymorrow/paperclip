@@ -263,6 +263,7 @@ function createRunContextDb(
   contextSnapshot: Record<string, unknown> = {},
   runAgentOrRows: string | Record<string, unknown>[] = ownerAgentId,
   runId: string = ownerRunId,
+  runExecutionWorkspaceMode: string = "shared_workspace",
 ) {
   const runRows = Array.isArray(runAgentOrRows)
     ? runAgentOrRows
@@ -279,6 +280,7 @@ function createRunContextDb(
   const rowsForSelection = (selection: Record<string, unknown>) => {
     const keys = Object.keys(selection);
     if (keys.includes("entityId")) return [];
+    if (keys.length === 1 && keys[0] === "mode") return [{ mode: runExecutionWorkspaceMode }];
     if (keys.includes("contextSnapshot")) return runRows;
     if (keys.includes("agentCompanyId")) return runRows;
     return [{ id: runAgentId, companyId: runAgentCompanyId, permissions: {}, role: "engineer", reportsTo: null }];
@@ -1167,7 +1169,7 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
-  it("defaults agent-created root follow-up issues to inherit the current run workspace", async () => {
+  it("defaults agent-created root follow-up issues to inherit a shared run workspace", async () => {
     const app = await createApp(
       ownerActor(),
       createRunContextDb({
@@ -1179,7 +1181,7 @@ describe("agent issue mutation checkout ownership", () => {
     const res = await request(app)
       .post(`/api/companies/${companyId}/issues`)
       .send({
-        title: "Follow-up in same worktree",
+        title: "Follow-up in same checkout",
         projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       });
 
@@ -1187,11 +1189,52 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.create).toHaveBeenCalledWith(
       companyId,
       expect.objectContaining({
-        title: "Follow-up in same worktree",
+        title: "Follow-up in same checkout",
         inheritExecutionWorkspaceFromIssueId: issueId,
       }),
     );
+    expect(mockIssueService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.not.objectContaining({ executionWorkspaceId: null }),
+    );
   });
+
+  it.each(["isolated_workspace", "operator_branch"])(
+    "keeps agent-created root follow-up issues out of a %s run worktree",
+    async (mode) => {
+      const app = await createApp(
+        ownerActor(),
+        createRunContextDb(
+          {
+            issueId,
+            executionWorkspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          },
+          ownerAgentId,
+          ownerRunId,
+          mode,
+        ),
+      );
+
+      const res = await request(app)
+        .post(`/api/companies/${companyId}/issues`)
+        .send({
+          title: "Unrelated follow-up filed mid-run",
+          projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      // Project context still carries over, the one-branch worktree does not: an explicit
+      // null execution workspace is what stops the create service adopting it (LAC-5133).
+      expect(mockIssueService.create).toHaveBeenCalledWith(
+        companyId,
+        expect.objectContaining({
+          title: "Unrelated follow-up filed mid-run",
+          inheritExecutionWorkspaceFromIssueId: issueId,
+          executionWorkspaceId: null,
+        }),
+      );
+    },
+  );
 
   it("preserves explicit workspace choices on agent-created root issues", async () => {
     const app = await createApp(

@@ -2127,7 +2127,7 @@ export function issueRoutes(
   async function resolveRunIssueWorkspaceInheritanceSource(
     companyId: string,
     actor: ReturnType<typeof getActorInfo>,
-  ): Promise<string | null> {
+  ): Promise<{ sourceIssueId: string; adoptExecutionWorkspace: boolean } | null> {
     if (actor.actorType !== "agent" || !actor.agentId || !actor.runId) return null;
     const run = await db
       .select({
@@ -2144,11 +2144,32 @@ export function issueRoutes(
     const context = run.contextSnapshot && typeof run.contextSnapshot === "object"
       ? run.contextSnapshot as Record<string, unknown>
       : null;
-    if (!context || !readNonEmptyString(context.executionWorkspaceId)) return null;
+    const runExecutionWorkspaceId = context ? readNonEmptyString(context.executionWorkspaceId) : null;
+    if (!context || !runExecutionWorkspaceId) return null;
     const paperclipIssue = context.paperclipIssue && typeof context.paperclipIssue === "object"
       ? context.paperclipIssue as Record<string, unknown>
       : null;
-    return readNonEmptyString(context.issueId) ?? readNonEmptyString(paperclipIssue?.id);
+    const sourceIssueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(paperclipIssue?.id);
+    if (!sourceIssueId) return null;
+    // An isolated workspace is one git worktree pinned to one branch. Callers only reach this
+    // resolver for issues that named no parent and no workspace of their own, so the new issue
+    // is not in the run issue's chain. Letting it adopt the worktree puts two unrelated issues
+    // in one branch slot: the second checks out its own branch, the recorded branch stops
+    // matching HEAD, and workspace validation then fails for every issue bound to that record,
+    // permanently (LAC-5133). Project and project-workspace context still carry over; only the
+    // worktree does not. A non-child follow-up that genuinely needs the same checkout says so
+    // with an explicit inheritExecutionWorkspaceFromIssueId.
+    const runWorkspace = await db
+      .select({ mode: executionWorkspaces.mode })
+      .from(executionWorkspaces)
+      .where(and(
+        eq(executionWorkspaces.id, runExecutionWorkspaceId),
+        eq(executionWorkspaces.companyId, companyId),
+      ))
+      .then((rows) => rows[0] ?? null);
+    const pinnedToOneBranch = runWorkspace?.mode === "isolated_workspace"
+      || runWorkspace?.mode === "operator_branch";
+    return { sourceIssueId, adoptExecutionWorkspace: !pinnedToOneBranch };
   }
 
   async function resolveAgentTrustForIssue(
@@ -6352,15 +6373,21 @@ export function issueRoutes(
       rawCreateBody.assigneeAgentId as string | null | undefined,
     );
     const actor = getActorInfo(req);
-    const runWorkspaceInheritanceSourceIssueId = hasExplicitIssueWorkspaceCreateSelection(rawCreateBody)
+    const runWorkspaceInheritance = hasExplicitIssueWorkspaceCreateSelection(rawCreateBody)
       ? null
       : await resolveRunIssueWorkspaceInheritanceSource(companyId, actor);
     const createBody = {
       ...rawCreateBody,
       parentId: effectiveParentId,
       ...(normalizedAssigneeAgentId !== undefined ? { assigneeAgentId: normalizedAssigneeAgentId } : {}),
-      ...(runWorkspaceInheritanceSourceIssueId
-        ? { inheritExecutionWorkspaceFromIssueId: runWorkspaceInheritanceSourceIssueId }
+      ...(runWorkspaceInheritance
+        ? {
+          inheritExecutionWorkspaceFromIssueId: runWorkspaceInheritance.sourceIssueId,
+          // An explicit (null) execution workspace is how the create service is told the
+          // choice is already made: it still inherits project and project-workspace context
+          // from the run issue, and leaves the run's worktree alone.
+          ...(runWorkspaceInheritance.adoptExecutionWorkspace ? {} : { executionWorkspaceId: null }),
+        }
         : {}),
       ...(watchdogProductBugFollowUp
         ? {
