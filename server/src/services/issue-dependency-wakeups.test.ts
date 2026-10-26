@@ -116,6 +116,59 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
     expect(existing?.id).toBe("wake-cycle");
   });
 
+  it("does not let a completed cycle-key wake suppress while the dependent is still blocked", async () => {
+    // A wake that ran and left the issue `blocked` healed nothing. Counting it
+    // as coverage parked `done_but_blocking` dependents for the life of the
+    // blocked cycle, because the cycle stamp never changes while it sits there.
+    const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([
+        {
+          id: "wake-cycle-completed",
+          status: "completed",
+          idempotencyKey: cycleKey,
+          requestedAt: secondCycle,
+        },
+      ]),
+      { ...readyState, dependentStatus: "blocked" },
+    );
+    expect(existing).toBeNull();
+  });
+
+  it("still lets an in-flight cycle-key wake suppress while the dependent is blocked", async () => {
+    const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+    for (const status of ["queued", "claimed", "deferred_issue_execution"]) {
+      const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+        dbWithWakes([
+          {
+            id: `wake-cycle-${status}`,
+            status,
+            idempotencyKey: cycleKey,
+            requestedAt: secondCycle,
+          },
+        ]),
+        { ...readyState, dependentStatus: "blocked" },
+      );
+      expect(existing?.id).toBe(`wake-cycle-${status}`);
+    }
+  });
+
+  it("suppresses a completed cycle-key wake once the dependent has left blocked", async () => {
+    const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([
+        {
+          id: "wake-cycle-completed",
+          status: "completed",
+          idempotencyKey: cycleKey,
+          requestedAt: secondCycle,
+        },
+      ]),
+      { ...readyState, dependentStatus: "todo" },
+    );
+    expect(existing?.id).toBe("wake-cycle-completed");
+  });
+
   it("does not let a completed old-key wake from a previous blocked cycle suppress", async () => {
     const oldKey = buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
       dependentIssueId,
