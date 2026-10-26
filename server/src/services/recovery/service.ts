@@ -132,6 +132,10 @@ import {
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
 } from "../issue-dependency-wakeups.js";
+import {
+  DEPENDENCY_READY_UNBLOCK_STATUS,
+  unblockDependencyReadyIssue,
+} from "../dependency-ready-unblock.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import {
@@ -178,6 +182,23 @@ const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = [
   "running",
   "scheduled_retry",
 ] as const;
+
+/**
+ * How old a `queued` wake or an unclaimed run may be and still count as a live
+ * execution path. Beyond this it is stranded, not in flight, and must not
+ * suppress a level-triggered repair.
+ */
+export const STRANDED_LIVE_PATH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+type LivePathAgeOptions = { maxAgeMs?: number | null };
+
+function livePathSince(opts?: LivePathAgeOptions): Date | null {
+  const maxAgeMs = opts?.maxAgeMs;
+  if (typeof maxAgeMs !== "number" || !Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
+    return null;
+  }
+  return new Date(Date.now() - maxAgeMs);
+}
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = [
   "interrupted",
   "failed",
@@ -1108,7 +1129,13 @@ export function recoveryService(
     companyId: string,
     issueId: string,
     agentId?: string | null,
+    opts?: LivePathAgeOptions,
   ) {
+    // `queued` and `scheduled_retry` are intent, not liveness: a run that was
+    // never claimed stays in that status forever and reads as an execution path
+    // that will never arrive. Callers that use this as a reason NOT to repair
+    // something pass a max age so a stranded row stops suppressing the repair.
+    const runSince = livePathSince(opts);
     const [run, deferredWake, nativeRecovery] = await Promise.all([
       db
         .select({ id: heartbeatRuns.id })
@@ -1121,6 +1148,9 @@ export function recoveryService(
             ]),
             sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
             agentId ? eq(heartbeatRuns.agentId, agentId) : sql`true`,
+            runSince
+              ? sql`coalesce(${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) >= ${runSince.toISOString()}::timestamptz`
+              : sql`true`,
           ),
         )
         .limit(1)
@@ -1134,6 +1164,9 @@ export function recoveryService(
             eq(agentWakeupRequests.status, "deferred_issue_execution"),
             sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}`,
             agentId ? eq(agentWakeupRequests.agentId, agentId) : sql`true`,
+            runSince
+              ? gte(agentWakeupRequests.requestedAt, runSince)
+              : sql`true`,
           ),
         )
         .limit(1)
@@ -1832,7 +1865,13 @@ export function recoveryService(
     companyId: string,
     issueId: string,
     agentId?: string | null,
+    opts?: LivePathAgeOptions,
   ) {
+    // `queued` is not age-bounded by the queue itself. A wake that was enqueued
+    // and never claimed suppresses level-triggered repair for as long as the row
+    // exists (38 hours measured on one issue). Callers that treat a queued wake
+    // as "already handled" pass a max age so a stranded wake stops counting.
+    const since = livePathSince(opts);
     return db
       .select({ id: agentWakeupRequests.id })
       .from(agentWakeupRequests)
@@ -1842,6 +1881,7 @@ export function recoveryService(
           eq(agentWakeupRequests.status, "queued"),
           sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}`,
           agentId ? eq(agentWakeupRequests.agentId, agentId) : sql`true`,
+          since ? gte(agentWakeupRequests.requestedAt, since) : sql`true`,
         ),
       )
       .limit(1)
@@ -5763,6 +5803,8 @@ export function recoveryService(
       checked: 0,
       healed: 0,
       existingWakeSkipped: 0,
+      unblocked: 0,
+      unblockSkipped: 0,
       selfBlockedSkipped: 0,
       livePathSkipped: 0,
       interactionSkipped: 0,
@@ -5909,27 +5951,6 @@ export function recoveryService(
           continue;
         }
 
-        // Level-triggered dedup: key on the full blocker set (the current ready
-        // state), not on any single resolved edge. An older completed per-edge
-        // wake for an earlier partial resolution has a different key, so it does
-        // not suppress this wake. The shared helper still suppresses a duplicate
-        // wake for the SAME ready state, which bounds reconciliation.
-        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-          dependentIssueId: candidate.id,
-          blockerIssueIds: readiness.blockerIssueIds,
-          blockedTransitionAt: candidate.blockedTransitionAt,
-        });
-        const existingWake =
-          await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-            companyId,
-            dependentIssueId: candidate.id,
-            blockerIssueIds: readiness.blockerIssueIds,
-            blockedTransitionAt: candidate.blockedTransitionAt,
-          });
-        if (existingWake) {
-          result.existingWakeSkipped += 1;
-          continue;
-        }
         // The assignee agent opened this blocked cycle itself, knowing its recorded
         // blockers were resolved: it is waiting on something outside the blocker
         // graph. Re-waking it here made it re-block on every sweep (each re-block
@@ -5940,8 +5961,12 @@ export function recoveryService(
         }
 
         if (
-          (await hasActiveExecutionPath(companyId, candidate.id, agentId)) ||
-          (await hasQueuedIssueWake(companyId, candidate.id, agentId))
+          (await hasActiveExecutionPath(companyId, candidate.id, agentId, {
+            maxAgeMs: STRANDED_LIVE_PATH_MAX_AGE_MS,
+          })) ||
+          (await hasQueuedIssueWake(companyId, candidate.id, agentId, {
+            maxAgeMs: STRANDED_LIVE_PATH_MAX_AGE_MS,
+          }))
         ) {
           result.livePathSkipped += 1;
           continue;
@@ -5961,6 +5986,59 @@ export function recoveryService(
           )
         ) {
           result.pauseHoldSkipped += 1;
+          continue;
+        }
+
+        // Write the transition, do not only ask for it. A wake alone leaves the
+        // issue `blocked`, which every sweep, standup check and agent reads as
+        // "not my turn", so a dependent whose blockers are all done parked
+        // forever whenever the woken agent did not move it. The guards above
+        // already proved nobody else owns this park.
+        const unblock = await unblockDependencyReadyIssue(
+          db,
+          {
+            companyId,
+            issueId: candidate.id,
+            blockerIssueIds: readiness.blockerIssueIds,
+            source,
+            runId: opts?.runId ?? null,
+            agentId,
+            actorId: requestedByActorId,
+          },
+          { issuesSvc, treeControlSvc },
+        );
+        if (unblock.unblocked) {
+          result.unblocked += 1;
+        } else {
+          result.unblockSkipped += 1;
+        }
+
+        // Level-triggered dedup: key on the full blocker set (the current ready
+        // state), not on any single resolved edge. An older completed per-edge
+        // wake for an earlier partial resolution has a different key, so it does
+        // not suppress this wake. The shared helper still suppresses a duplicate
+        // wake for the SAME ready state, which bounds reconciliation.
+        //
+        // This runs after the transition on purpose. A `completed` wake that ran
+        // and changed nothing used to suppress every later attempt for the life
+        // of the blocked cycle, so the dedup must never gate the status write.
+        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+          dependentIssueId: candidate.id,
+          blockerIssueIds: readiness.blockerIssueIds,
+          blockedTransitionAt: candidate.blockedTransitionAt,
+        });
+        const existingWake =
+          await findExistingIssueBlockersResolvedWakeForReadyState(db, {
+            companyId,
+            dependentIssueId: candidate.id,
+            blockerIssueIds: readiness.blockerIssueIds,
+            blockedTransitionAt: candidate.blockedTransitionAt,
+            dependentStatus: unblock.unblocked
+              ? DEPENDENCY_READY_UNBLOCK_STATUS
+              : "blocked",
+          });
+        if (existingWake) {
+          result.existingWakeSkipped += 1;
           continue;
         }
 

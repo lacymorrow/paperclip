@@ -180,18 +180,28 @@ function wakeCoversIssueBlockersResolvedReadyState(
     oldStateKey: string;
     legacyKeys: Set<string>;
     blockedTransitionAt: Date | null;
+    dependentStillBlocked: boolean;
   },
 ): boolean {
   const idempotencyKey = wake.idempotencyKey;
   if (!idempotencyKey) return false;
 
+  // A `completed` wake is proof that the dependent was told, not proof that it
+  // healed. While the dependent is still `blocked` the wake ran and changed
+  // nothing, so treating it as coverage parked the issue for the life of the
+  // blocked cycle. In-flight statuses still suppress: that wake has not run yet.
+  const idempotentStatuses = keys.dependentStillBlocked
+    ? IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET
+    : IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET;
+
   if (idempotencyKey === keys.cycleKey) {
-    return IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status);
+    return idempotentStatuses.has(wake.status);
   }
 
   if (idempotencyKey === keys.oldStateKey) {
     if (IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET.has(wake.status)) return true;
     if (wake.status !== "completed") return false;
+    if (keys.dependentStillBlocked) return false;
     if (!keys.blockedTransitionAt) return true;
     return wake.requestedAt.getTime() >= keys.blockedTransitionAt.getTime();
   }
@@ -209,7 +219,9 @@ function wakeCoversIssueBlockersResolvedReadyState(
  *
  * - The cycle-aware state key matches a wake in any idempotent status
  *   (including `completed`). This suppresses a duplicate for the SAME ready
- *   state, including the current blocked cycle.
+ *   state, including the current blocked cycle. When `dependentStatus` says the
+ *   dependent is still `blocked`, a `completed` wake does not count: it ran and
+ *   left the issue parked, so the caller is entitled to another attempt.
  * - The old no-cycle state key matches in-flight statuses (deploy overlap),
  *   or a `completed` wake whose `requestedAt` is at or after the current
  *   `blockedTransitionAt` (same cycle). A completed old-key wake from a
@@ -225,6 +237,11 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     dependentIssueId: string;
     blockerIssueIds: string[];
     blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+    /**
+     * The dependent's status now. When it is still `blocked`, a `completed`
+     * wake did not heal anything and must not suppress a retry.
+     */
+    dependentStatus?: string | null;
   },
 ) {
   const cycleKey = buildIssueBlockersResolvedWakeStateKey(input);
@@ -265,6 +282,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
       oldStateKey,
       legacyKeys: new Set(legacyKeyList),
       blockedTransitionAt,
+      dependentStillBlocked: input.dependentStatus === "blocked",
     }),
   );
   return covering ?? null;
