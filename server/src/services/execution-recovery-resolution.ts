@@ -550,6 +550,13 @@ export async function settleUnrecoverableExecutions(
               executionRunId: null,
               checkoutRunId: null,
               updatedAt: now,
+              // Stamp the transition the same way issueService.update does.
+              // `blockedTransitionAt` gates the routable-blocked unblock
+              // request and every blocked-age read, so a raw writer that skips
+              // it makes the park invisible to both.
+              ...(task.status !== "blocked"
+                ? { blockedTransitionAt: now, blockedOwnerNotifiedAt: null }
+                : {}),
             })
             .where(eq(issues.id, task.id)).returning();
           // Only a transition owned by this failure grants a recovery receipt.

@@ -3797,6 +3797,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   executionAgentNameKey: null,
                   executionLockedAt: null,
                   updatedAt: now,
+                  // Stamp the transition the same way issueService.update does.
+                  // `blockedTransitionAt` gates the routable-blocked unblock
+                  // request and every blocked-age read, so a raw writer that
+                  // skips it makes the park invisible to both.
+                  ...(issue.status !== "blocked"
+                    ? { blockedTransitionAt: now, blockedOwnerNotifiedAt: null }
+                    : {}),
                 })
                 .where(eq(issues.id, issue.id));
               await insertIssueComment(tx, {
