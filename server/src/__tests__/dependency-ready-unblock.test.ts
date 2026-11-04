@@ -21,7 +21,8 @@ import {
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 vi.mock("../telemetry.ts", () => ({ getTelemetryClient: () => mockTelemetryClient }));
 
-import { recoveryService } from "../services/recovery/service.ts";
+import { recoveryService, STRANDED_LIVE_PATH_MAX_AGE_MS } from "../services/recovery/service.ts";
+import { unblockDependencyReadyIssue } from "../services/dependency-ready-unblock.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -242,6 +243,52 @@ describeEmbeddedPostgres("resolved dependency wake backstop unblocks the depende
     expect(result.livePathSkipped).toBe(1);
     expect(result.unblocked).toBe(0);
     expect((await readStatus(dependentIssueId)).status).toBe("blocked");
+  });
+
+  it("stops deferring to a wake once it is older than the measured cutoff", async () => {
+    const { companyId, agentId, dependentIssueId } = await seedDoneButBlocking();
+    await db.insert(agentWakeupRequests).values({
+      companyId, agentId, source: "automation", triggerDetail: "system", reason: "issue_assigned",
+      status: "queued", payload: { issueId: dependentIssueId },
+      requestedAt: new Date(Date.now() - STRANDED_LIVE_PATH_MAX_AGE_MS - 60_000),
+    });
+    const result = await backstop().run(companyId);
+    expect(result.livePathSkipped).toBe(0);
+    expect(result.unblocked).toBe(1);
+  });
+
+  it("still defers to a wake just inside the measured cutoff", async () => {
+    const { companyId, agentId, dependentIssueId } = await seedDoneButBlocking();
+    await db.insert(agentWakeupRequests).values({
+      companyId, agentId, source: "automation", triggerDetail: "system", reason: "issue_assigned",
+      status: "queued", payload: { issueId: dependentIssueId },
+      requestedAt: new Date(Date.now() - STRANDED_LIVE_PATH_MAX_AGE_MS + 5 * 60_000),
+    });
+    const result = await backstop().run(companyId);
+    expect(result.livePathSkipped).toBe(1);
+    expect((await readStatus(dependentIssueId)).status).toBe("blocked");
+  });
+
+  it("refuses to unblock an issue that has no assignee", async () => {
+    const { companyId, dependentIssueId, blockerIssueId } = await seedDoneButBlocking({
+      assigneeAgentId: null,
+    });
+    const result = await unblockDependencyReadyIssue(db, {
+      companyId, issueId: dependentIssueId, blockerIssueIds: [blockerIssueId], source: "test",
+    });
+    expect(result).toEqual({ unblocked: false, reason: "no_assignee" });
+    expect((await readStatus(dependentIssueId)).status).toBe("blocked");
+  });
+
+  it("reports a failed write as not unblocked instead of throwing", async () => {
+    const { companyId, dependentIssueId, blockerIssueId } = await seedDoneButBlocking();
+    const issuesSvc = { update: async () => { throw new Error("db down"); } } as never;
+    const result = await unblockDependencyReadyIssue(
+      db,
+      { companyId, issueId: dependentIssueId, blockerIssueIds: [blockerIssueId], source: "test" },
+      { issuesSvc },
+    );
+    expect(result).toEqual({ unblocked: false, reason: "error" });
   });
 
   it("leaves a park that an unblock descriptor owns alone", async () => {

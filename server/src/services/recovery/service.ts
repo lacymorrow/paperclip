@@ -187,8 +187,18 @@ const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = [
  * How old a `queued` wake or an unclaimed run may be and still count as a live
  * execution path. Beyond this it is stranded, not in flight, and must not
  * suppress a level-triggered repair.
+ *
+ * Measured, not guessed: queue-to-claim latency of the 5,988 runs that did get
+ * claimed in the 30 days to 2026-11-03 (local instance, `started_at - created_at`):
+ *   <1m 3452 | 1-15m 1212 | 15m-1h 611 | 1-2h 280 | 2-4h 196 | 4-6h 104
+ *   6-8h 29 | 8-12h 49 | 12-16h 15 | 16-20h 11 | 20-24h 6 | 24-36h 15 | >36h 8
+ * p50 34s, p90 78m, p99 11.5h; wake queue-to-claim is the same shape (p50 48s,
+ * p99 12.1h). The tail decays smoothly with no gap, so no cut separates "slow"
+ * from "stranded" exactly. 12h treats 99.1% of the runs that were eventually
+ * claimed as live and releases the 0.9% beyond it. The earlier 24h cut was a
+ * guess. Re-measure if the claim-latency distribution shifts.
  */
-export const STRANDED_LIVE_PATH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const STRANDED_LIVE_PATH_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 type LivePathAgeOptions = { maxAgeMs?: number | null };
 
@@ -5951,6 +5961,34 @@ export function recoveryService(
           continue;
         }
 
+        // Level-triggered dedup: key on the full blocker set (the current ready
+        // state), not on any single resolved edge. An older completed per-edge
+        // wake for an earlier partial resolution has a different key, so it does
+        // not suppress this wake. The shared helper still suppresses a duplicate
+        // wake for the SAME ready state, which bounds reconciliation.
+        //
+        // Candidates are `blocked` here, so a `completed` wake that ran and left
+        // the issue parked does not count (`dependentStatus`); only an in-flight
+        // wake suppresses. Runs before the live-path guards so an in-flight wake
+        // is reported as the existing wake it is.
+        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+          dependentIssueId: candidate.id,
+          blockerIssueIds: readiness.blockerIssueIds,
+          blockedTransitionAt: candidate.blockedTransitionAt,
+        });
+        const existingWake =
+          await findExistingIssueBlockersResolvedWakeForReadyState(db, {
+            companyId,
+            dependentIssueId: candidate.id,
+            blockerIssueIds: readiness.blockerIssueIds,
+            blockedTransitionAt: candidate.blockedTransitionAt,
+            dependentStatus: "blocked",
+          });
+        if (existingWake) {
+          result.existingWakeSkipped += 1;
+          continue;
+        }
+
         // The assignee agent opened this blocked cycle itself, knowing its recorded
         // blockers were resolved: it is waiting on something outside the blocker
         // graph. Re-waking it here made it re-block on every sweep (each re-block
@@ -6011,35 +6049,6 @@ export function recoveryService(
           result.unblocked += 1;
         } else {
           result.unblockSkipped += 1;
-        }
-
-        // Level-triggered dedup: key on the full blocker set (the current ready
-        // state), not on any single resolved edge. An older completed per-edge
-        // wake for an earlier partial resolution has a different key, so it does
-        // not suppress this wake. The shared helper still suppresses a duplicate
-        // wake for the SAME ready state, which bounds reconciliation.
-        //
-        // This runs after the transition on purpose. A `completed` wake that ran
-        // and changed nothing used to suppress every later attempt for the life
-        // of the blocked cycle, so the dedup must never gate the status write.
-        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-          dependentIssueId: candidate.id,
-          blockerIssueIds: readiness.blockerIssueIds,
-          blockedTransitionAt: candidate.blockedTransitionAt,
-        });
-        const existingWake =
-          await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-            companyId,
-            dependentIssueId: candidate.id,
-            blockerIssueIds: readiness.blockerIssueIds,
-            blockedTransitionAt: candidate.blockedTransitionAt,
-            dependentStatus: unblock.unblocked
-              ? DEPENDENCY_READY_UNBLOCK_STATUS
-              : "blocked",
-          });
-        if (existingWake) {
-          result.existingWakeSkipped += 1;
-          continue;
         }
 
         try {

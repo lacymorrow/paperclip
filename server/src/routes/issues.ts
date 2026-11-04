@@ -15822,6 +15822,14 @@ export function issueRoutes(
             // the dependent `blocked`, the one status every sweep and every
             // agent reads as "not my turn", so it parked forever whenever the
             // woken agent did not move it itself.
+            //
+            // No self-blocked skip here, unlike the backstop. The backstop
+            // skips an assignee that opened the current blocked cycle because
+            // it re-wakes on a timer and would loop: wake, re-block, new
+            // cycle, wake. This path fires once, on the edge where the final
+            // blocker actually reached `done`. The assignee's recorded
+            // blockers were not all resolved when it blocked, so the
+            // transition is new information and runs at most once per edge.
             const unblock = await unblockDependencyReadyIssue(
               db,
               {
