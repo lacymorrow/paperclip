@@ -88,6 +88,17 @@ async function changeLockedAgent(tx: Db, effects: LifecycleEffects, agent: Lifec
     lifecycleOperation: operation, status,
     pauseReason: holds[0] ?? null,
     pausedAt: next === "pausing" ? new Date() : next === "ready" ? null : agent.pausedAt,
+    // `error_reason` describes the execution status, so it must not outlive it.
+    // `compatibilityStatus` carries `error` through a `ready` state unchanged,
+    // but a pause of an errored agent reports `paused` and the following resume
+    // reports `idle`, and neither write touched the reason. The agent then reads
+    // healthy while still quoting the failure that ended its last run, which an
+    // operator or an agent inspecting itself has no way to date. Only
+    // `clearError` and `finalizeAgentStatus` cleared it before, and neither is
+    // on the pause/resume path a budget hold takes. Mirrors
+    // `finalizeAgentStatus`: the reason is written for `error` and null
+    // otherwise.
+    ...(status === "error" ? {} : { errorReason: null }),
     updatedAt: new Date(),
   }).where(eq(agents.id, agent.id)).returning();
   if (next === "terminating" || next === "rejected") {

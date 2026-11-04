@@ -754,7 +754,20 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         ((finalizedRun
           ? readHeartbeatRunErrorFamily(finalizedRun) === "provider_quota"
           : runErrorCode === "provider_quota") ||
-          isWorkspaceSyncConflictFailure(adapterResult.errorMessage)),
+          isWorkspaceSyncConflictFailure(adapterResult.errorMessage) ||
+          // A turn cap is not a crash. The harness stopped an agent that was
+          // still working at `maxTurnsPerRun`; nothing about the agent itself
+          // failed, and the run has just been handed to the bounded max-turn
+          // continuation retry above. Writing the agent to `error` costs an
+          // operator a clear-error round trip and raises an agent_error_alert
+          // for a state nothing is wrong in, while the continuation retry is
+          // already carrying the work.
+          isMaxTurnExhaustionRun(
+            finalizedRun ?? {
+              errorCode: runErrorCode,
+              resultJson: adapterResult.resultJson ?? null,
+            },
+          )),
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
     });
     if (finalizedRun) {

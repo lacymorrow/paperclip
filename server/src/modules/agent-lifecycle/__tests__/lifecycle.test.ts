@@ -654,6 +654,33 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
     }
   });
 
+  // `error_reason` is a caption for `status`, so it must not outlive it. Only
+  // `clearError` and `finalizeAgentStatus` ever cleared it, and a pause/resume
+  // cycle (what a budget hold performs) takes neither, so an agent that errored
+  // and was later released read `idle` while still quoting the failure that
+  // ended its last run. Nothing dates that string, so an operator or an agent
+  // inspecting itself cannot tell a live failure from a settled one.
+  it("drops the failure reason once the agent leaves error status", async () => {
+    const work = worker();
+    const agent = await hire();
+    await work.process(agent.id);
+    await db.update(agents)
+      .set({ status: "error", errorReason: "Legacy controller lease lost" })
+      .where(eq(agents.id, agent.id));
+
+    await createAgentLifecycle(db).pauseAgent(agent.id);
+    const paused = await current(agent.id);
+    expect(paused.status).not.toBe("error");
+    expect(paused.errorReason).toBeNull();
+
+    await work.process(agent.id);
+    await createAgentLifecycle(db).resumeAgent(agent.id);
+    await work.process(agent.id);
+    const resumed = await current(agent.id);
+    expect(resumed.status).toBe("idle");
+    expect(resumed.errorReason).toBeNull();
+  });
+
   it("settles notice reactivation only with the outer lifecycle transaction", async () => {
     const work = worker();
     const agent = await hire();

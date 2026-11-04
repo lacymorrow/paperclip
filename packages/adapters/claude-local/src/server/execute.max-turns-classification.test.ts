@@ -29,6 +29,13 @@ import { execute } from "./execute.js";
 const POISONED_TOOL_OUTPUT =
   'execute.ts:1199: : failed && isClaudeModelNotFoundError({ ... ? "model_not_found"';
 
+// Tool output the agent itself printed while probing an HTTP API. The
+// login-prompt detector scans every stdout line for "unauthorized", so an
+// agent that curls any authenticated route poisons it. Nothing about the
+// Claude session is unauthenticated here.
+const POISONED_LOGIN_TOOL_OUTPUT =
+  "probe: GET /api/agents/me -> HTTP/1.1 401 Unauthorized";
+
 function buildProcResult(resultEvent: Record<string, unknown>, extraStdout = "") {
   return {
     exitCode: 1,
@@ -101,5 +108,51 @@ describe("claude_local failure classification precedence", () => {
     const result = await execute(buildContext() as never);
 
     expect(result.errorCode).toBe("model_not_found");
+  });
+
+  // A run that reported error_max_turns executed its whole turn budget, which
+  // only an authenticated session can do. Coding it claude_auth_required
+  // renders "Error: not logged in to Claude" and routes an operator to
+  // reconnect an account that is fine.
+  it("keeps max_turns_exhausted when stdout mentions a login prompt", async () => {
+    mockExecutionResult(
+      buildProcResult({ is_error: true, subtype: "error_max_turns" }, POISONED_LOGIN_TOOL_OUTPUT),
+    );
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.errorCode).toBe("max_turns_exhausted");
+    expect(result.resultJson?.stopReason).toBe("max_turns_exhausted");
+  });
+
+  // The token-failure marker is scoped to the parsed terminal fields, which on
+  // a capped run are the agent's own last words. Narrow scope does not help
+  // when the agent was working on authentication when the cap hit.
+  it("keeps max_turns_exhausted when the capped run's own result text mentions an auth failure", async () => {
+    mockExecutionResult(
+      buildProcResult({
+        is_error: true,
+        subtype: "error_max_turns",
+        result: "Reached maximum number of turns (80). Last step: the probe returned authentication_failed, still debugging.",
+      }),
+    );
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.errorCode).toBe("max_turns_exhausted");
+  });
+
+  it("still reports claude_auth_required when the session genuinely needs login", async () => {
+    mockExecutionResult(
+      buildProcResult({
+        is_error: true,
+        subtype: "error",
+        result: "Invalid bearer token. Please run `claude login`.",
+      }),
+    );
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.errorCode).toBe("claude_auth_required");
   });
 });

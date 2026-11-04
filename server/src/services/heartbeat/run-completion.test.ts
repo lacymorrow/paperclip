@@ -251,6 +251,27 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(f.agent.id, expected, expect.any(String), expect.objectContaining({ keepIdleOnFailure: result.errorCode === "provider_quota" }));
   });
 
+  // A turn cap is not a crash. The harness stopped an agent that was still
+  // working, the bounded max-turn continuation retry carries the task, and the
+  // agent itself is healthy, so it must stay idle instead of landing in
+  // `error` for an operator to clear. The second case is the masked one: the
+  // adapter can seal a capped run with an unrelated errorCode (the login
+  // heuristic reads raw stdout), so the server reads the structured stopReason
+  // rather than trusting the code alone.
+  it.each([
+    { name: "coded max_turns_exhausted", errorCode: "max_turns_exhausted", resultJson: { stopReason: "max_turns_exhausted" } },
+    { name: "capped run masked as an auth failure", errorCode: "claude_auth_required", resultJson: { stopReason: "max_turns_exhausted" } },
+  ])("keeps the agent idle after a turn cap ($name)", async ({ name: _name, ...result }) => {
+    const f = await fixture();
+    Object.assign(f.input.adapterResult, {
+      ...result,
+      errorMessage: "Claude run failed: subtype=error_max_turns: Reached maximum number of turns (80)",
+    });
+    await f.completion.completeRun(f.input);
+    expect(await read(f.run.id)).toMatchObject({ status: "failed", errorCode: result.errorCode });
+    expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(f.agent.id, "failed", expect.any(String), expect.objectContaining({ keepIdleOnFailure: true }));
+  });
+
   it.each(["completeRun", "failRun"] as const)("waits for an owned Stop before %s can write a competing outcome", async operation => {
     const f = await fixture();
     let settle!: () => void;

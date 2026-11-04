@@ -1214,7 +1214,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       // first. A lost duplex control channel surfaces the typed
       // `duplex_channel_lost` code before any provider classification.
       ? proc.errorCode
-      : loginMeta.requiresLogin
+      // The login detector reads the raw stdout line by line, so an agent that
+      // merely prints a login phrase (grepping this runtime's source, tailing a
+      // server log, echoing an issue body) trips `requiresLogin`. A run that
+      // reported `subtype=error_max_turns` executed its full turn budget, which
+      // only an authenticated session can do, so the structured cap signal wins.
+      // Without this guard the run is sealed as `claude_auth_required`, which
+      // renders "Error: not logged in to Claude" and routes an operator to
+      // reconnect an account that is fine. Same guard the providerQuota,
+      // transientUpstream and model_not_found branches already apply.
+      : loginMeta.requiresLogin && !(failed && clearSessionForMaxTurns)
       ? "claude_auth_required"
       // Structured CLI signals outrank the model-not-found detector, which
       // scans the run's full stdout for a literal "model not found" phrase.
