@@ -1,10 +1,11 @@
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   issueRecoveryActions,
   issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
+import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
 import { issueService } from "./issues.js";
 import { issueTreeControlService } from "./issue-tree-control.js";
@@ -34,7 +35,9 @@ export type DependencyReadyUnblockSkipReason =
   | "recovery_action"
   | "pending_interaction"
   | "pause_hold"
-  | "update_rejected";
+  | "no_assignee"
+  | "update_rejected"
+  | "error";
 
 export type DependencyReadyUnblockResult =
   | { unblocked: true; previousStatus: string; identifier: string | null }
@@ -92,6 +95,26 @@ export async function unblockDependencyReadyIssue(
   input: DependencyReadyUnblockInput,
   deps: UnblockDeps = {},
 ): Promise<DependencyReadyUnblockResult> {
+  // Never throws. Callers emit the wake right after this returns, and the wake
+  // is the notification the assignee depends on; a failed status write must
+  // not swallow it. A failure here reads as "not unblocked" and the dependency
+  // backstop retries the transition on its next sweep.
+  try {
+    return await unblockDependencyReadyIssueUnsafe(db, input, deps);
+  } catch (err) {
+    logger.warn(
+      { err, issueId: input.issueId, source: input.source },
+      "dependency-ready unblock failed; leaving issue blocked for the backstop",
+    );
+    return { unblocked: false, reason: "error" };
+  }
+}
+
+async function unblockDependencyReadyIssueUnsafe(
+  db: Db,
+  input: DependencyReadyUnblockInput,
+  deps: UnblockDeps,
+): Promise<DependencyReadyUnblockResult> {
   const issuesSvc = deps.issuesSvc ?? issueService(db);
 
   const issue = await db
@@ -99,6 +122,8 @@ export async function unblockDependencyReadyIssue(
       id: issues.id,
       identifier: issues.identifier,
       status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
+      assigneeUserId: issues.assigneeUserId,
       unblockDescriptor: issues.unblockDescriptor,
     })
     .from(issues)
@@ -107,6 +132,12 @@ export async function unblockDependencyReadyIssue(
     .then((rows) => rows[0] ?? null);
   if (!issue) return { unblocked: false, reason: "issue_missing" };
   if (issue.status !== "blocked") return { unblocked: false, reason: "not_blocked" };
+  // `todo` means "assigned and ready". Without an assignee nobody is told and
+  // nobody owns it, so the issue would leave the one status that still
+  // surfaces it as parked.
+  if (!issue.assigneeAgentId && !issue.assigneeUserId) {
+    return { unblocked: false, reason: "no_assignee" };
+  }
   // An unblock descriptor names the owner who has to act. Clearing the status
   // would take the issue off that owner's queue without the action happening.
   if (issue.unblockDescriptor) return { unblocked: false, reason: "unblock_descriptor" };
@@ -118,7 +149,14 @@ export async function unblockDependencyReadyIssue(
       and(
         eq(issueRecoveryActions.companyId, input.companyId),
         eq(issueRecoveryActions.sourceIssueId, input.issueId),
-        inArray(issueRecoveryActions.status, [...OWNED_RECOVERY_ACTION_STATUSES]),
+        or(
+          inArray(issueRecoveryActions.status, [...OWNED_RECOVERY_ACTION_STATUSES]),
+          // A resolved action can still hold execution: replay stays blocked
+          // until its evidence clears, and the wake path defers behind it. Moving
+          // the issue to `todo` underneath that hold would hide the park from
+          // the backstop that resumes it once the hold lifts.
+          sql`${issueRecoveryActions.evidence} -> 'automaticRecovery' ->> 'replay' = 'blocked'`,
+        ),
       ),
     )
     .limit(1)
@@ -157,6 +195,26 @@ export async function unblockDependencyReadyIssue(
   });
   if (!updated) return { unblocked: false, reason: "update_rejected" };
 
+  // The status write above is the transition. Comment and activity are audit
+  // trail; losing them must not report the transition as failed.
+  try {
+    await writeUnblockAudit(db, input, issue, issuesSvc);
+  } catch (err) {
+    logger.warn(
+      { err, issueId: input.issueId },
+      "dependency-ready unblock audit write failed after the status moved",
+    );
+  }
+
+  return { unblocked: true, previousStatus: issue.status, identifier: issue.identifier };
+}
+
+async function writeUnblockAudit(
+  db: Db,
+  input: DependencyReadyUnblockInput,
+  issue: { identifier: string | null; status: string },
+  issuesSvc: ReturnType<typeof issueService>,
+) {
   const blockerRows =
     input.blockerIssueIds.length > 0
       ? await db
@@ -196,6 +254,4 @@ export async function unblockDependencyReadyIssue(
       blockerIssueIds: input.blockerIssueIds,
     },
   });
-
-  return { unblocked: true, previousStatus: issue.status, identifier: issue.identifier };
 }

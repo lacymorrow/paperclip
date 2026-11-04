@@ -1146,7 +1146,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     expect(cycleKeyWakes).toHaveLength(1);
   });
 
-  it("does not re-heal when a completed old-key wake is from the current blocked cycle", async () => {
+  it("retries when a completed old-key wake from the current blocked cycle left the issue blocked", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
     const blockedTransitionAt = new Date("2026-08-01T12:00:00.000Z");
@@ -1177,6 +1177,29 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
 
     const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
 
+    // A completed wake proves the assignee was told, not that the issue moved.
+    // It is still `blocked`, so the backstop writes the transition and re-wakes.
+    expect(result.existingWakeSkipped).toBe(0);
+    expect(result.unblocked).toBe(1);
+    expect(result.healed).toBe(1);
+    const row = await db.select({ status: issues.status }).from(issues).where(eq(issues.id, blockedIssueId)).then((r) => r[0]);
+    expect(row?.status).toBe("todo");
+  });
+
+  it("does not re-heal while an old-key wake from the current blocked cycle is still in flight", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const blockedTransitionAt = new Date("2026-08-01T12:00:00.000Z");
+    await db.update(issues).set({ blockedTransitionAt, updatedAt: blockedTransitionAt }).where(eq(issues.id, blockedIssueId));
+    await db.insert(agentWakeupRequests).values({
+      companyId, agentId, source: "automation", triggerDetail: "system", reason: "issue_blockers_resolved",
+      payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerIssueId, blockerIssueIds: [blockerIssueId] },
+      status: "queued", requestedAt: new Date(),
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKeyWithoutCycle({
+        dependentIssueId: blockedIssueId, blockerIssueIds: [blockerIssueId],
+      }),
+    });
+    const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
     expect(result.healed).toBe(0);
     expect(result.existingWakeSkipped).toBe(1);
   });
