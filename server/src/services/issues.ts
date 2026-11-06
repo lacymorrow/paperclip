@@ -38,6 +38,10 @@ import { type AuthorizationActor, executionWorkspaceReadSqlCondition, projectRea
 import { assertExecutionWorkspaceRecordAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-access.js";
 import { type TaskWorkspaceSelection, type TaskWorkspaceIntent } from "@paperclipai/shared";
 import { executionWorkspaceService } from "./execution-workspaces.js";
+import {
+  clearStaleWorkspaceBindingsForTerminalIssue,
+  executionWorkspaceIsInheritable,
+} from "./execution-workspace-bindings.js";
 import { notifyChatPublicationWork } from "./chat-work-notifications.js";
 import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
 import { requestRestorePointDeletion } from "./git-restore-point-ledger.js";
@@ -10410,6 +10414,9 @@ export function issueService(db: Db) {
               .select({
                 id: executionWorkspaces.id,
                 mode: executionWorkspaces.mode,
+                status: executionWorkspaces.status,
+                strategyType: executionWorkspaces.strategyType,
+                sourceIssueId: executionWorkspaces.sourceIssueId,
               })
               .from(executionWorkspaces)
               .where(
@@ -10419,7 +10426,19 @@ export function issueService(db: Db) {
                 ),
               )
               .then((rows) => rows[0] ?? null);
-            if (sourceWorkspace) {
+            // Inheriting a workspace is only safe while that workspace can still
+            // be worked in. A worktree whose own source issue has finished is a
+            // branch that stopped moving, and a closed workspace has no
+            // directory left to share, so neither is handed to a new issue that
+            // did not name it. Project and project-workspace context above still
+            // carry over, so the issue still lands in the right project.
+            const sourceWorkspaceIsInheritable = sourceWorkspace !== null
+              && await executionWorkspaceIsInheritable(tx as unknown as Db, {
+                companyId,
+                workspace: sourceWorkspace,
+                parentIssueId: issueData.parentId ?? null,
+              });
+            if (sourceWorkspace && sourceWorkspaceIsInheritable) {
               executionWorkspaceId = sourceWorkspace.id;
               inheritedWorkspaceSelection = true;
               executionWorkspacePreference = "reuse_existing";
@@ -11780,6 +11799,21 @@ export function issueService(db: Db) {
           }
           if (updated.status === "done" || updated.status === "cancelled") {
             await finalizeSummarySlotsForTerminalIssue(tx, updated);
+            // A worktree is one branch slot. Its branch stops moving when this
+            // issue finishes, and nothing else re-reads the leases on it: the
+            // bindings were legal when they were made, and this close is the
+            // event that turns them stale. Re-examine them here, where the
+            // branch freezes, rather than when a run on a co-tenant later finds
+            // a checkout dozens of releases behind its base.
+            await clearStaleWorkspaceBindingsForTerminalIssue(tx as unknown as Db, {
+              companyId: updated.companyId,
+              sourceIssueId: updated.id,
+              actor: {
+                actorType: actorAgentId ? "agent" : actorUserId ? "user" : "system",
+                actorId: actorAgentId ?? actorUserId ?? "issue_service",
+                agentId: actorAgentId ?? null,
+              },
+            });
             // Every terminal transition funnels through here, including direct
             // service callers (tree control, recovery, status cards)
             // that never touch the HTTP routes. Governed cards expire; ordinary
