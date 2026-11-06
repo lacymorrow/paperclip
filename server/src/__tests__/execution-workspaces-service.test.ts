@@ -772,6 +772,62 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     expect(archived?.cleanupEligibleAt).toBeInstanceOf(Date);
   }, 20_000);
 
+  it("releases co-tenant leases when it archives a delivered terminal workspace", async () => {
+    const seed = await seedTerminalWorkspace({ mergedPr: true });
+    const coTenantId = randomUUID();
+    const finishedTenantId = randomUUID();
+    await db.insert(issues).values([
+      {
+        id: coTenantId,
+        companyId: seed.companyId,
+        projectId: seed.projectId,
+        title: "Unrelated co-tenant",
+        status: "in_progress",
+        priority: "medium",
+        executionWorkspaceId: seed.executionWorkspaceId,
+        executionWorkspacePreference: "reuse_existing",
+      },
+      {
+        id: finishedTenantId,
+        companyId: seed.companyId,
+        projectId: seed.projectId,
+        title: "Finished co-tenant",
+        status: "done",
+        priority: "medium",
+        executionWorkspaceId: seed.executionWorkspaceId,
+        executionWorkspacePreference: "reuse_existing",
+      },
+    ]);
+
+    expect(await svc.sweepTerminalWorkspaces()).toMatchObject({ archived: 1 });
+
+    const tenants = await db
+      .select({
+        id: issues.id,
+        status: issues.status,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        executionWorkspacePreference: issues.executionWorkspacePreference,
+      })
+      .from(issues)
+      .where(inArray(issues.id, [coTenantId, finishedTenantId, seed.sourceIssueId]))
+      .then((rows) => new Map(rows.map((row) => [row.id, row])));
+
+    // The directory is gone, so the lease has to go with it.
+    expect(tenants.get(coTenantId)).toMatchObject({
+      status: "in_progress",
+      executionWorkspaceId: null,
+      executionWorkspacePreference: "isolated_workspace",
+    });
+    // A finished issue needs no workspace, and its binding is history.
+    expect(tenants.get(finishedTenantId)).toMatchObject({
+      executionWorkspaceId: seed.executionWorkspaceId,
+    });
+    // The source issue keeps its binding: a reopen restores this workspace for it.
+    expect(tenants.get(seed.sourceIssueId)).toMatchObject({
+      executionWorkspaceId: seed.executionWorkspaceId,
+    });
+  }, 20_000);
+
   describe("delivery reads after a pooled disconnect", () => {
     const issueTreeFields = "id,status,completedAt,cancelledAt,updatedAt";
     const pullRequestProductFields = "id,url,externalId,title,summary,metadata";

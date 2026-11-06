@@ -51,6 +51,7 @@ import path from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { and, asc, desc, eq, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import { clearWorkspaceBindingsForClosedWorkspace } from "./execution-workspace-bindings.js";
 import {
   executionWorkspaces,
   agents,
@@ -4103,6 +4104,20 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             cleanupEligibleAt: archived.cleanupEligibleAt?.toISOString() ?? null,
             cleanupReason: ISSUE_TERMINAL_WORKSPACE_CLEANUP_REASON,
           },
+        });
+
+        // The cleanup below removes the worktree directory. An issue still bound
+        // to this workspace would ask a later run to restore a directory that is
+        // gone: the restore cannot validate, so the issue parks instead of
+        // working, and nothing re-reads the binding afterwards. Release those
+        // leases here. The source issue keeps its own binding, because a reopen
+        // rebuilds this workspace for the source issue and for no one else.
+        await clearWorkspaceBindingsForClosedWorkspace(db, {
+          companyId: archived.companyId,
+          workspaceId: archived.id,
+          sourceIssueId: archived.sourceIssueId,
+          actor: { actorType: "system", actorId: "workspace_terminality_reaper" },
+          reason: "workspace_archived",
         });
 
         const capturedGeneration = readExecutionWorkspaceLifecycleGeneration(
