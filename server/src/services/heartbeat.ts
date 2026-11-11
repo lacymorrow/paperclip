@@ -304,8 +304,9 @@ const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS = BOUNDED_TRANSIENT_HEARTBE
  * Another run holds the single-branch execution workspace this run resolved to
  * (LAC-6296 guard, LAC-7736 handling). Contention is a wait, not a crash: the
  * code it carries is what keeps the heartbeat catch from erroring the agent and
- * stops recovery classifying it as a setup failure. The string itself lives
- * with the error that raises it, in `environments.ts`.
+ * stops recovery classifying it as a setup failure. The string itself lives in
+ * `execution-workspace-policy.ts`, which is also where the error that raises it
+ * reads it from.
  */
 const EXECUTION_WORKSPACE_LEASE_CONFLICT_RETRY_REASON = "execution_workspace_lease_conflict";
 const EXECUTION_WORKSPACE_LEASE_CONFLICT_WAKE_REASON = "execution_workspace_lease_conflict_retry";
