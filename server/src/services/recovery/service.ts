@@ -33,7 +33,7 @@ import { redactCurrentUserText } from "../../log-redaction.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { logActivity } from "../activity-log.js";
 import { budgetService } from "../budgets.js";
-import { EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE } from "../environments.js";
+import { EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE } from "../execution-workspace-policy.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";

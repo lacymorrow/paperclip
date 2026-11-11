@@ -24,11 +24,8 @@ import type {
   ExecutionWorkspace,
   ExecutionWorkspaceConfig,
 } from "@paperclipai/shared";
-import {
-  EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE,
-  ExecutionWorkspaceLeaseConflictError,
-  environmentService,
-} from "./environments.js";
+import { ExecutionWorkspaceLeaseConflictError, environmentService } from "./environments.js";
+import { EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE } from "./execution-workspace-policy.js";
 import {
   environmentRuntimeService,
   buildEnvironmentLeaseContext,

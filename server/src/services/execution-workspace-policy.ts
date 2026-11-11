@@ -9,6 +9,17 @@ import { asString, parseObject } from "../adapters/utils.js";
 
 export type ParsedExecutionWorkspaceMode = Exclude<ExecutionWorkspaceMode, "inherit" | "reuse_existing">;
 
+/**
+ * Error code for execution workspace contention. It lives in this
+ * dependency-free policy module, not in `environments.ts`, because three
+ * layers have to agree on the string with no type to enforce it - the
+ * orchestrator's `EnvironmentErrorCode`, the heartbeat catch that keeps the
+ * agent idle, and recovery's continuation classifier - and `environments.ts`
+ * is `vi.mock`ed by eight route suites, where importing a constant through it
+ * makes every partial mock a build break (LAC-7736).
+ */
+export const EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE = "execution_workspace_lease_conflict";
+
 export const WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE = "workspace_worktree_requires_project";
 export const WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION =
   "Attach a project to the task, or bind a reusable execution workspace, then retry.";

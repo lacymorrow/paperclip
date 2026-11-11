@@ -145,6 +145,7 @@ import {
 import {
   buildExecutionWorkspaceAdapterConfig,
   gateProjectExecutionWorkspacePolicy,
+  EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE,
   issueExecutionWorkspaceModeForPersistedWorkspace,
   isUnrunnableWorktreeCombo,
   parseIssueExecutionWorkspaceSettings,
@@ -214,7 +215,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
-import { EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE, environmentService } from "./environments.js";
+import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";

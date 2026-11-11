@@ -29,15 +29,10 @@ import {
   type UpdateEnvironment,
 } from "@paperclipai/shared";
 import { conflict } from "../errors.js";
-import { executionWorkspaceRequiresExclusiveLease } from "./execution-workspace-policy.js";
-
-/**
- * Error code for workspace contention. Exported because three layers have to
- * agree on this string with no type to enforce it: the orchestrator's
- * `EnvironmentErrorCode`, the heartbeat catch that keeps the agent idle, and
- * recovery's continuation classifier (LAC-7736).
- */
-export const EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE = "execution_workspace_lease_conflict";
+import {
+  EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE,
+  executionWorkspaceRequiresExclusiveLease,
+} from "./execution-workspace-policy.js";
 
 /**
  * Raised when a run asks for a single-branch execution workspace that another
