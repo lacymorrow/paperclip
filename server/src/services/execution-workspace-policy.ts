@@ -9,6 +9,17 @@ import { asString, parseObject } from "../adapters/utils.js";
 
 export type ParsedExecutionWorkspaceMode = Exclude<ExecutionWorkspaceMode, "inherit" | "reuse_existing">;
 
+/**
+ * Error code for execution workspace contention. It lives in this
+ * dependency-free policy module, not in `environments.ts`, because three
+ * layers have to agree on the string with no type to enforce it - the
+ * orchestrator's `EnvironmentErrorCode`, the heartbeat catch that keeps the
+ * agent idle, and recovery's continuation classifier - and `environments.ts`
+ * is `vi.mock`ed by eight route suites, where importing a constant through it
+ * makes every partial mock a build break (LAC-7736).
+ */
+export const EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE = "execution_workspace_lease_conflict";
+
 export const WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE = "workspace_worktree_requires_project";
 export const WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION =
   "Attach a project to the task, or bind a reusable execution workspace, then retry.";
@@ -319,4 +330,34 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
   }
 
   return nextConfig;
+}
+
+/**
+ * Single-branch execution workspaces cannot be shared by two concurrent runs.
+ *
+ * A git worktree (or any workspace whose mode pins it to one branch) is one
+ * directory with one checked-out HEAD. Two runs holding it at once means the
+ * second checks its own branch out from under the first: measured on LAC-6296,
+ * where two `active` ephemeral leases on one worktree cost an engineer their
+ * uncommitted tree and put an unrelated commit on another issue's PR branch.
+ *
+ * Shared workspaces are deliberately concurrent - several issues sharing one
+ * checkout is what `shared_workspace` is for - and sandbox/adapter-managed
+ * workspaces have their own lease reuse rules, so both are left alone. This
+ * guard is scoped to the local-checkout class that actually collided.
+ */
+export function executionWorkspaceRequiresExclusiveLease(workspace: {
+  mode: string | null | undefined;
+  strategyType: string | null | undefined;
+  providerType?: string | null | undefined;
+}): boolean {
+  const remotelyManaged =
+    workspace.strategyType === "cloud_sandbox" ||
+    workspace.strategyType === "adapter_managed" ||
+    workspace.providerType === "cloud_sandbox" ||
+    workspace.providerType === "adapter_managed";
+  if (remotelyManaged) return false;
+  if (workspace.strategyType === "git_worktree") return true;
+  if (workspace.providerType === "git_worktree") return true;
+  return workspace.mode === "isolated_workspace" || workspace.mode === "operator_branch";
 }
