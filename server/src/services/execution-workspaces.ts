@@ -49,9 +49,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { and, asc, desc, eq, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { clearWorkspaceBindingsForClosedWorkspace } from "./execution-workspace-bindings.js";
+import { BRANCH_PINNED_WORKSPACE_STRATEGY, clearWorkspaceBindingsForClosedWorkspace } from "./execution-workspace-bindings.js";
 import {
   executionWorkspaces,
   agents,
@@ -145,6 +145,12 @@ function issueTerminalTimestamp(issue: {
 const WORKSPACE_BRANCH_INCOHERENCE_REASON = "git_worktree_branch_incoherence";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 export const ISSUE_TERMINAL_WORKSPACE_CLEANUP_REASON = "issue_terminal";
+
+// The actor and the reason the missing-path worktree pass records. They name the
+// measurement that moved the row: the recorded directory of an `active` worktree
+// was not on disk.
+export const MISSING_WORKTREE_PATH_SWEEP_ACTOR = "workspace_missing_path_reaper";
+export const MISSING_WORKTREE_PATH_REASON = "workspace_path_missing";
 
 // The reopen-failure reason kept on the row when a rebuild does not finish. The
 // value is sanitized: it never contains a repository URL, a host path, or git
@@ -2673,6 +2679,187 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     return conditions;
   }
 
+  // The one writer that takes an execution workspace out of an open status.
+  // Hoisted out of the service's returned object so an in-service sweep can
+  // reach it by name instead of adding a second status writer. The exported
+  // method below is this function.
+  async function archiveWorkspaceUnderLifecycleLock(input: {
+    id: string;
+    patch: Partial<typeof executionWorkspaces.$inferInsert>;
+    closedAt: Date;
+  }): Promise<
+    | { outcome: "archived"; workspace: ExecutionWorkspace; capturedGeneration: number }
+    | { outcome: "reopen_pending" }
+    | null
+  > {
+  const [identity] = await db.select({ companyId: executionWorkspaces.companyId }).from(executionWorkspaces)
+    .where(eq(executionWorkspaces.id, input.id));
+  if (!identity) return null;
+  return withExecutionWorkspaceLifecycleLock(db, input.id, async (tx) => {
+    const fresh = await measureRunPhase("workspace.row_lock", () => tx
+      .select()
+      .from(executionWorkspaces)
+      .where(and(eq(executionWorkspaces.id, input.id), eq(executionWorkspaces.companyId, identity.companyId)))
+      .for("no key update")
+      .then((rows) => rows[0] ?? null));
+    if (!fresh || isClosedExecutionWorkspaceStatus(fresh.status)) {
+      // The row is missing or already closed by a concurrent path. Do not
+      // archive again.
+      return null;
+    }
+    if (metadataHasReopenPendingConsumption(fresh.metadata as Record<string, unknown> | null)) {
+      // A reopen published this row as active while its source issue is still
+      // terminal. A caller will consume the rebuilt worktree. Refuse the
+      // archive and keep the flag, so the destructive path never removes the
+      // rebuilt worktree. The route maps this to HTTP 409.
+      return { outcome: "reopen_pending" };
+    }
+    const nextPatch = preserveWorkspaceMetadataForPatch(fresh, input.patch);
+    const baseMetadata =
+      (nextPatch.metadata as Record<string, unknown> | null | undefined)
+      ?? (fresh.metadata as Record<string, unknown> | null);
+    const archiveMetadata = clearMetadataReopenPendingConsumption(
+      bumpExecutionWorkspaceLifecycleGeneration(baseMetadata),
+    );
+    await measureRunPhase("workspace.notification", () => notifyTerminalWorkspaceWork(tx, `workspace:${input.id}`));
+    const archived = await tx
+      .update(executionWorkspaces)
+      .set({
+        ...nextPatch,
+        status: "archived",
+        closedAt: input.closedAt,
+        cleanupReason: null,
+        metadata: archiveMetadata,
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(executionWorkspaces.id, input.id),
+        eq(executionWorkspaces.companyId, fresh.companyId),
+        // Defense in depth: never archive a reopen-pending row even if the
+        // flag appears between the read above and this write. The lifecycle
+        // lock already serializes reopen and archive, so this predicate only
+        // adds a second, authoritative guard at the write.
+        sql<boolean>`(${executionWorkspaces.metadata} ->> ${EXECUTION_WORKSPACE_REOPEN_PENDING_METADATA_KEY}) IS DISTINCT FROM 'true'`,
+      ))
+      .returning()
+      .then((rows) => rows[0] ?? null);
+    if (!archived) return null;
+    return {
+      outcome: "archived",
+      workspace: toExecutionWorkspace(archived),
+      capturedGeneration: readExecutionWorkspaceLifecycleGeneration(archiveMetadata),
+    };
+  });
+  }
+
+  // A git worktree whose recorded directory is gone cannot be validated, so every
+  // issue the runtime sends there parks under a recovery action instead of
+  // working. `active` is exactly the state the close-time and create-time guards
+  // treat as healthy, and a directory that disappeared fires no board event at
+  // all, so neither of those guards ever reaches this row. This pass is the
+  // detection: it stats the recorded path and takes the row out of `active`.
+  //
+  // It writes no status itself. It routes through
+  // `archiveWorkspaceUnderLifecycleLock`, so it inherits that path's row lock,
+  // its lifecycle generation bump and its refusal to archive a reopen-pending
+  // row, and it releases the co-tenant leases with the same helper the terminal
+  // reaper uses. Leaving the leases bound would keep the park this pass exists to
+  // end: a bound issue would ask a later run to restore a directory that is gone.
+  async function sweepMissingPathWorktreeWorkspaces(limit = 50, signal?: AbortSignal) {
+    const result = {
+      checked: 0,
+      missingPath: 0,
+      archived: 0,
+      skippedRace: 0,
+      skippedReopenPending: 0,
+      archivedWorkspaceIds: [] as string[],
+    };
+    const candidates = await db
+      .select({
+        id: executionWorkspaces.id,
+        companyId: executionWorkspaces.companyId,
+        sourceIssueId: executionWorkspaces.sourceIssueId,
+        cwd: executionWorkspaces.cwd,
+        providerRef: executionWorkspaces.providerRef,
+      })
+      .from(executionWorkspaces)
+      .where(and(
+        // A shared repository root (`project_primary`) is not branch-pinned and
+        // is not this class, so this pass discriminates on the same strategy
+        // carve-out the binding re-examination uses.
+        eq(executionWorkspaces.strategyType, BRANCH_PINNED_WORKSPACE_STRATEGY),
+        // `idle` and `in_review` are live states that still own their directory
+        // and are reached by other paths. `active` is the state no guard checks.
+        eq(executionWorkspaces.status, "active"),
+        isNull(executionWorkspaces.closedAt),
+        // No recorded path means there is nothing to stat, so this pass has no
+        // evidence about the row and leaves it to the guard that owns it.
+        isNotNull(executionWorkspaces.cwd),
+      ))
+      .orderBy(asc(executionWorkspaces.updatedAt), asc(executionWorkspaces.id))
+      .limit(limit);
+
+    for (const candidate of candidates) {
+      signal?.throwIfAborted();
+      result.checked += 1;
+      // `providerRef` tracks `cwd` for a local worktree, so treat the directory
+      // as gone only when neither recorded path resolves. A row whose `cwd` is
+      // stale while its provider path is still on disk has a directory to
+      // validate and must not be archived off a single stale column.
+      if (await pathExists(candidate.cwd)) continue;
+      if (candidate.providerRef && await pathExists(candidate.providerRef)) continue;
+      result.missingPath += 1;
+
+      const archived = await archiveWorkspaceUnderLifecycleLock({
+        id: candidate.id,
+        patch: {},
+        closedAt: now(),
+      });
+      if (!archived) {
+        // A concurrent path closed or removed the row between the scan and the
+        // lock. The next rotation re-reads whatever state it left behind.
+        result.skippedRace += 1;
+        continue;
+      }
+      if (archived.outcome === "reopen_pending") {
+        // A reopen published this row as active and a caller will consume the
+        // rebuilt worktree. The directory this pass measured as gone is the one
+        // the reopen is rebuilding, so refusing is correct.
+        result.skippedReopenPending += 1;
+        continue;
+      }
+      result.archived += 1;
+      result.archivedWorkspaceIds.push(candidate.id);
+
+      await logActivity(db, {
+        companyId: candidate.companyId,
+        actorType: "system",
+        actorId: MISSING_WORKTREE_PATH_SWEEP_ACTOR,
+        action: "execution_workspace.worktree_path_missing_archived",
+        entityType: "execution_workspace",
+        entityId: candidate.id,
+        details: {
+          sourceIssueId: candidate.sourceIssueId,
+          cwd: candidate.cwd,
+          providerRef: candidate.providerRef,
+        },
+      });
+
+      // The directory is already gone, so there is no cleanup to run. What is
+      // left is the leases. The source issue keeps its own binding, because a
+      // reopen rebuilds this workspace for the source issue and for no one else.
+      await clearWorkspaceBindingsForClosedWorkspace(db, {
+        companyId: candidate.companyId,
+        workspaceId: candidate.id,
+        sourceIssueId: candidate.sourceIssueId,
+        actor: { actorType: "system", actorId: MISSING_WORKTREE_PATH_SWEEP_ACTOR },
+        reason: MISSING_WORKTREE_PATH_REASON,
+      });
+    }
+    return result;
+  }
+
+
   return {
     requestTaskRepository: executionWorkspaceRepositoryService(db).request,
     listTaskRepositories: executionWorkspaceRepositoryService(db).list,
@@ -3442,6 +3629,22 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         isolatedRehomeDeadlines.clear();
         nestedCloneMigrationDeadlines.clear();
         terminalSweepRescanRequested = false;
+        // A worktree whose directory vanished fires no board event, so this pass
+        // has no trigger of its own and rides the rotation that already ticks on
+        // a timer. One pass per rotation, at the start, so the rows it archives
+        // are already closed when the terminality scan below reads them. A
+        // failure here is logged and retried on the next rotation: it must never
+        // abort the terminal sweep, which owns unrelated cleanup.
+        await sweepMissingPathWorktreeWorkspaces(limit, signal)
+          .then((missingPath) => {
+            if (missingPath.archived > 0 || missingPath.skippedReopenPending > 0) {
+              logger.info({ event: "execution_workspace.missing_path_sweep", ...missingPath }, "Worktree workspaces with a missing directory inspected");
+            }
+          })
+          .catch((error: unknown) => {
+            signal?.throwIfAborted();
+            logger.warn({ err: error }, "missing-path worktree workspace sweep failed; it retries on the next rotation");
+          });
         if (opts.gitCacheExpirationEnabled && opts.isolatedSourceRehomeEnabled && isolatedOrphanSweepDueAt <= now().getTime()) {
           const dryRun = opts.isolatedSourceRehomeDryRun ?? false;
           const batch = await sweepOrphanedIsolatedRepositorySources(db, { dryRun, signal, after: isolatedOrphanCursor }).catch((error: unknown) => {
@@ -4164,6 +4367,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       }
     },
 
+    sweepMissingPathWorktreeWorkspaces,
     hasTerminalWorkspaceSweepContinuation: () => terminalSweepCursor !== null || terminalSweepRescanRequested,
 
     terminalWorkspaceWorkSettled: (hints?: ReadonlySet<string>) => {
@@ -4823,74 +5027,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     // not archive. The route maps that outcome to HTTP 409 and returns before any
     // destructive cleanup, so the archive control never removes a rebuilt
     // worktree during the reopen consumption window.
-    archiveWorkspaceUnderLifecycleLock: async (input: {
-      id: string;
-      patch: Partial<typeof executionWorkspaces.$inferInsert>;
-      closedAt: Date;
-    }): Promise<
-      | { outcome: "archived"; workspace: ExecutionWorkspace; capturedGeneration: number }
-      | { outcome: "reopen_pending" }
-      | null
-    > => {
-      const [identity] = await db.select({ companyId: executionWorkspaces.companyId }).from(executionWorkspaces)
-        .where(eq(executionWorkspaces.id, input.id));
-      if (!identity) return null;
-      return withExecutionWorkspaceLifecycleLock(db, input.id, async (tx) => {
-        const fresh = await measureRunPhase("workspace.row_lock", () => tx
-          .select()
-          .from(executionWorkspaces)
-          .where(and(eq(executionWorkspaces.id, input.id), eq(executionWorkspaces.companyId, identity.companyId)))
-          .for("no key update")
-          .then((rows) => rows[0] ?? null));
-        if (!fresh || isClosedExecutionWorkspaceStatus(fresh.status)) {
-          // The row is missing or already closed by a concurrent path. Do not
-          // archive again.
-          return null;
-        }
-        if (metadataHasReopenPendingConsumption(fresh.metadata as Record<string, unknown> | null)) {
-          // A reopen published this row as active while its source issue is still
-          // terminal. A caller will consume the rebuilt worktree. Refuse the
-          // archive and keep the flag, so the destructive path never removes the
-          // rebuilt worktree. The route maps this to HTTP 409.
-          return { outcome: "reopen_pending" };
-        }
-        const nextPatch = preserveWorkspaceMetadataForPatch(fresh, input.patch);
-        const baseMetadata =
-          (nextPatch.metadata as Record<string, unknown> | null | undefined)
-          ?? (fresh.metadata as Record<string, unknown> | null);
-        const archiveMetadata = clearMetadataReopenPendingConsumption(
-          bumpExecutionWorkspaceLifecycleGeneration(baseMetadata),
-        );
-        await measureRunPhase("workspace.notification", () => notifyTerminalWorkspaceWork(tx, `workspace:${input.id}`));
-        const archived = await tx
-          .update(executionWorkspaces)
-          .set({
-            ...nextPatch,
-            status: "archived",
-            closedAt: input.closedAt,
-            cleanupReason: null,
-            metadata: archiveMetadata,
-            updatedAt: new Date(),
-          })
-          .where(and(
-            eq(executionWorkspaces.id, input.id),
-            eq(executionWorkspaces.companyId, fresh.companyId),
-            // Defense in depth: never archive a reopen-pending row even if the
-            // flag appears between the read above and this write. The lifecycle
-            // lock already serializes reopen and archive, so this predicate only
-            // adds a second, authoritative guard at the write.
-            sql<boolean>`(${executionWorkspaces.metadata} ->> ${EXECUTION_WORKSPACE_REOPEN_PENDING_METADATA_KEY}) IS DISTINCT FROM 'true'`,
-          ))
-          .returning()
-          .then((rows) => rows[0] ?? null);
-        if (!archived) return null;
-        return {
-          outcome: "archived",
-          workspace: toExecutionWorkspace(archived),
-          capturedGeneration: readExecutionWorkspaceLifecycleGeneration(archiveMetadata),
-        };
-      });
-    },
+    archiveWorkspaceUnderLifecycleLock,
 
     // Apply the terminal cleanup outcome to a workspace row through the lifecycle
     // gateway. The archive route calls this after the destruction fence ran, to
