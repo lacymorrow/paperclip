@@ -425,4 +425,34 @@ describeEmbeddedPostgres("environmentService.acquireLease execution workspace ex
     const active = await svc.listLeases(seed.environmentId, { status: "active" });
     expect(active).toHaveLength(2);
   });
+
+  it("honours a fresh active lease that cannot name its run", async () => {
+    const seed = await seedContendedWorkspace();
+
+    // Acquisitions that do not pass a heartbeatRunId still take the workspace:
+    // whoever made them may genuinely be in the checkout right now.
+    await svc.acquireLease({ ...acquireInput(seed, "holder"), heartbeatRunId: null });
+
+    await expect(svc.acquireLease(acquireInput(seed, "contender"))).rejects.toThrow(
+      ExecutionWorkspaceLeaseConflictError,
+    );
+  });
+
+  it("does not let a stale null-run lease wedge the worktree forever", async () => {
+    const seed = await seedContendedWorkspace();
+    const orphan = await svc.acquireLease({ ...acquireInput(seed, "holder"), heartbeatRunId: null });
+
+    // Nothing releases a null-run lease: releaseLeasesForRun is keyed by run id
+    // and there is no expiry sweep. Age it past the hold bound.
+    const staleAt = new Date(Date.now() - 60 * 60 * 1000);
+    await db
+      .update(environmentLeases)
+      .set({ acquiredAt: staleAt, lastUsedAt: staleAt })
+      .where(eq(environmentLeases.id, orphan.id));
+
+    const contenderLease = await svc.acquireLease(acquireInput(seed, "contender"));
+
+    expect(contenderLease.status).toBe("active");
+    expect(contenderLease.heartbeatRunId).toBe(seed.contenderRunId);
+  });
 });

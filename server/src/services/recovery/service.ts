@@ -33,6 +33,7 @@ import { redactCurrentUserText } from "../../log-redaction.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { logActivity } from "../activity-log.js";
 import { budgetService } from "../budgets.js";
+import { EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE } from "../environments.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
@@ -242,6 +243,11 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
   "claude_transient_upstream",
   "provider_quota",
   "timeout",
+  // Another run held this issue's single-branch execution workspace, so this
+  // run never dispatched (LAC-7736). Contention clears on the holder's lease
+  // boundary, which makes it the most transient code in this set - not a crash
+  // worth escalating the issue to `blocked` on the first sighting.
+  EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE,
 ]);
 
 const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([

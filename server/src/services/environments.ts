@@ -32,13 +32,21 @@ import { conflict } from "../errors.js";
 import { executionWorkspaceRequiresExclusiveLease } from "./execution-workspace-policy.js";
 
 /**
+ * Error code for workspace contention. Exported because three layers have to
+ * agree on this string with no type to enforce it: the orchestrator's
+ * `EnvironmentErrorCode`, the heartbeat catch that keeps the agent idle, and
+ * recovery's continuation classifier (LAC-7736).
+ */
+export const EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE = "execution_workspace_lease_conflict";
+
+/**
  * Raised when a run asks for a single-branch execution workspace that another
  * run already holds an `active` lease on. See LAC-6296: before this guard,
  * `acquireLease` was an unconditional insert, so two runs could hold one git
  * worktree and the collision was only legible from the lease table afterwards.
  */
 export class ExecutionWorkspaceLeaseConflictError extends Error {
-  readonly code = "execution_workspace_lease_conflict";
+  readonly code = EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE;
   readonly executionWorkspaceId: string;
   readonly conflictingLeaseId: string;
   readonly conflictingHeartbeatRunId: string | null;
@@ -67,6 +75,20 @@ export class ExecutionWorkspaceLeaseConflictError extends Error {
 /** Run statuses that still own whatever they acquired. Matches the existing
  *  live-run predicates in routines/task-watchdogs/heartbeat. */
 const LIVE_HEARTBEAT_RUN_STATUSES: readonly string[] = ["queued", "running", "scheduled_retry"];
+
+/**
+ * How long an `active` lease that cannot name a `heartbeatRunId` may hold a
+ * single-branch execution workspace (LAC-7736).
+ *
+ * Nothing releases such a lease on its own: `releaseLeasesForRun` is keyed by
+ * run id, `releaseLease` needs a caller holding the lease id, and there is no
+ * expiry sweep over `environment_leases`. So honouring a null-run holder
+ * indefinitely would wedge the worktree for every later run - the same failure
+ * mode the dead-holder carve-out below exists to prevent. A genuinely live
+ * holder refreshes `lastUsedAt` (`updateLeaseMetadata`, `releaseLease`), so
+ * staleness is measured from there and falls back to `acquiredAt`.
+ */
+const NULL_RUN_WORKSPACE_LEASE_HOLD_MS = 15 * 60 * 1000;
 
 type EnvironmentRow = typeof environments.$inferSelect;
 type EnvironmentLeaseRow = typeof environmentLeases.$inferSelect;
@@ -674,6 +696,8 @@ export function environmentService(db: Db) {
                 id: environmentLeases.id,
                 heartbeatRunId: environmentLeases.heartbeatRunId,
                 issueId: environmentLeases.issueId,
+                acquiredAt: environmentLeases.acquiredAt,
+                lastUsedAt: environmentLeases.lastUsedAt,
                 holderRunStatus: heartbeatRuns.status,
               })
               .from(environmentLeases)
@@ -697,8 +721,15 @@ export function environmentService(db: Db) {
               ) {
                 return false;
               }
-              // Anything else - including an acquisition that cannot name its
-              // own run - is refused.
+              // A lease with no run id has no releaser (see
+              // NULL_RUN_WORKSPACE_LEASE_HOLD_MS), so it is honoured only while
+              // it is fresh. Past the bound it is a leak, not a holder.
+              if (lease.heartbeatRunId === null) {
+                const heldSince = lease.lastUsedAt ?? lease.acquiredAt ?? null;
+                if (!heldSince) return false;
+                return now.getTime() - new Date(heldSince).getTime() < NULL_RUN_WORKSPACE_LEASE_HOLD_MS;
+              }
+              // Anything else is a live holder and is refused.
               return true;
             });
             if (heldByAnotherRun) {

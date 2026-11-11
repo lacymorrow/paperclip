@@ -24,7 +24,11 @@ import type {
   ExecutionWorkspace,
   ExecutionWorkspaceConfig,
 } from "@paperclipai/shared";
-import { ExecutionWorkspaceLeaseConflictError, environmentService } from "./environments.js";
+import {
+  EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE,
+  ExecutionWorkspaceLeaseConflictError,
+  environmentService,
+} from "./environments.js";
 import {
   environmentRuntimeService,
   buildEnvironmentLeaseContext,
@@ -58,7 +62,7 @@ export type EnvironmentErrorCode =
   | "unsupported_adapter_environment"
   | "probe_failed"
   | "lease_acquire_failed"
-  | "execution_workspace_lease_conflict"
+  | typeof EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE
   | "workspace_realization_failed"
   | "transport_resolution_failed"
   | "lease_release_failed"
@@ -213,7 +217,7 @@ export function environmentRunOrchestrator(
       // than check its own branch out on top (LAC-6296). Keep the distinct code
       // so the park names the holder instead of reading as a generic failure.
       if (err instanceof ExecutionWorkspaceLeaseConflictError) {
-        throw new EnvironmentRunError("execution_workspace_lease_conflict", err.message, {
+        throw new EnvironmentRunError(EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE, err.message, {
           environmentId: input.environment.id,
           driver: input.environment.driver,
           cause: err,

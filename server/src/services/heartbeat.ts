@@ -214,7 +214,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
-import { environmentService } from "./environments.js";
+import { EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE, environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
@@ -299,6 +299,29 @@ const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_JITTER_RATIO = 0.25;
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON = "transient_failure";
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON = "transient_failure_retry";
 const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS = BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS.length;
+/**
+ * Another run holds the single-branch execution workspace this run resolved to
+ * (LAC-6296 guard, LAC-7736 handling). Contention is a wait, not a crash: the
+ * code it carries is what keeps the heartbeat catch from erroring the agent and
+ * stops recovery classifying it as a setup failure. The string itself lives
+ * with the error that raises it, in `environments.ts`.
+ */
+const EXECUTION_WORKSPACE_LEASE_CONFLICT_RETRY_REASON = "execution_workspace_lease_conflict";
+const EXECUTION_WORKSPACE_LEASE_CONFLICT_WAKE_REASON = "execution_workspace_lease_conflict_retry";
+/**
+ * Backoff for the deferred re-acquisition. A worktree is released on a lease
+ * boundary - the end of the holding run - so the first retries are short; the
+ * tail covers a long-running holder without retrying into it forever. Once the
+ * ladder is exhausted the run stays `failed` with the code above and the issue
+ * is left to the recovery continuation path, which treats the code as transient
+ * infrastructure rather than a crash.
+ */
+const EXECUTION_WORKSPACE_LEASE_CONFLICT_RETRY_DELAYS_MS = [
+  30 * 1000,
+  2 * 60 * 1000,
+  5 * 60 * 1000,
+  15 * 60 * 1000,
+] as const;
 const WORKSPACE_VALIDATION_FAILURE_CODE = "workspace_validation_failed";
 const WORKSPACE_VALIDATION_RECOVERY_CAUSE = "workspace_validation_failed";
 const CONFIGURATION_INCOMPLETE_FAILURE_CODE = "configuration_incomplete";
@@ -1358,10 +1381,29 @@ function isConfigurationIncompleteFailure(error: unknown): error is Configuratio
   return error instanceof ConfigurationIncompleteFailure;
 }
 
+/**
+ * Matches both the raw `ExecutionWorkspaceLeaseConflictError` thrown by
+ * `environmentService.acquireLease` and the `EnvironmentRunError` the
+ * orchestrator re-raises it as: both carry the same `code`, and the lease layer
+ * is reachable from heartbeat through either.
+ */
+function isExecutionWorkspaceLeaseConflictFailure(error: unknown) {
+  const maybe = error as { code?: unknown } | null;
+  return Boolean(
+    maybe && typeof maybe === "object" && maybe.code === EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE,
+  );
+}
+
 function isConfigurationIncompleteFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
   return run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE;
+}
+
+function isExecutionWorkspaceLeaseConflictRun(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
+) {
+  return run?.errorCode === EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE;
 }
 
 async function hasGitMetadata(cwd: string | null | undefined) {
@@ -12475,14 +12517,28 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // recovery path routes it to a human owner instead of looping retries.
           const workspaceValidationSetupFailure = isWorkspaceValidationFailure(outerErr) ? outerErr : null;
           const configurationIncompleteSetupFailure = isConfigurationIncompleteFailure(outerErr) ? outerErr : null;
+          // Another run holds the single-branch worktree this run resolved to.
+          // The run cannot proceed, but nothing is broken: the agent must stay
+          // idle so its other projects keep running, and the work is deferred
+          // to a bounded `scheduled_retry` instead of being recorded as a crash
+          // (LAC-7736; the agent-wide `error` was the LAC-6296 18-hour stall).
+          const executionWorkspaceLeaseConflict = isExecutionWorkspaceLeaseConflictFailure(outerErr);
           const recordedResponsibleUserDenialCode =
             normalizeResponsibleUserDenialCode((await getRun(runId).catch(() => null))?.errorCode);
           const setupFailureErrorCode =
             workspaceValidationSetupFailure?.code ??
             configurationIncompleteSetupFailure?.code ??
+            (executionWorkspaceLeaseConflict ? EXECUTION_WORKSPACE_LEASE_CONFLICT_CODE : null) ??
             recordedResponsibleUserDenialCode ??
             "setup_failed";
-          logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
+          if (executionWorkspaceLeaseConflict) {
+            logger.warn(
+              { err: outerErr, runId },
+              "heartbeat run deferred because another run holds its execution workspace",
+            );
+          } else {
+            logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
+          }
           const setupFailureAgent = await getAgent(run.agentId).catch(() => null);
           const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
             error: message,
@@ -12517,18 +12573,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             // Emit a run-log event so the failure is visible in the run timeline,
             // consistent with what the inner catch block does for adapter failures.
             await appendRunEvent(failedRun, 1, {
-              eventType: "error",
+              eventType: executionWorkspaceLeaseConflict ? "lifecycle" : "error",
               stream: "system",
-              level: "error",
+              level: executionWorkspaceLeaseConflict ? "warn" : "error",
               message,
             }).catch(() => undefined);
             const livenessRun = await classifyAndPersistRunLiveness(failedRun).catch(() => failedRun);
             const failedAgent = setupFailureAgent ?? await getAgent(run.agentId).catch(() => null);
             if (failedAgent) {
               await refreshContinuationSummaryForRun(livenessRun, failedAgent).catch(() => undefined);
-              if (!isWorkspaceValidationFailedRun(livenessRun) && !isConfigurationIncompleteFailedRun(livenessRun)) {
+              if (
+                !isWorkspaceValidationFailedRun(livenessRun) &&
+                !isConfigurationIncompleteFailedRun(livenessRun) &&
+                // Contention is not a run that owed the issue a comment; letting
+                // the comment policy queue its own `missing_issue_comment` wake
+                // would race the deferral scheduled just below.
+                !isExecutionWorkspaceLeaseConflictRun(livenessRun)
+              ) {
                 await finalizeIssueCommentPolicy(livenessRun, failedAgent).catch(() => undefined);
               }
+            }
+            // Defer before releasing the issue execution lock: the scheduled
+            // retry moves `issues.executionRunId` onto itself, which both keeps
+            // the issue on a live execution path (so recovery leaves it alone)
+            // and makes the release below a no-op for the execution column.
+            // Same ordering as the adapter-failure retry path above.
+            if (executionWorkspaceLeaseConflict && failedAgent) {
+              const nextConflictAttempt = (livenessRun.scheduledRetryAttempt ?? 0) + 1;
+              const conflictRetryDelayMs = EXECUTION_WORKSPACE_LEASE_CONFLICT_RETRY_DELAYS_MS[
+                Math.min(nextConflictAttempt, EXECUTION_WORKSPACE_LEASE_CONFLICT_RETRY_DELAYS_MS.length) - 1
+              ];
+              await scheduleBoundedRetryForRun(livenessRun, failedAgent, {
+                retryReason: EXECUTION_WORKSPACE_LEASE_CONFLICT_RETRY_REASON,
+                wakeReason: EXECUTION_WORKSPACE_LEASE_CONFLICT_WAKE_REASON,
+                maxAttempts: EXECUTION_WORKSPACE_LEASE_CONFLICT_RETRY_DELAYS_MS.length,
+                delayMs: conflictRetryDelayMs,
+              }).catch((retryError) => {
+                logger.error(
+                  { err: retryError, runId },
+                  "failed to schedule deferred retry after execution workspace lease conflict",
+                );
+              });
             }
             await releaseIssueExecutionAndPromote(livenessRun).catch((releaseError) => {
               logger.error(
@@ -12541,7 +12626,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           // path owned the terminal transition. If another path already finalized
           // the run, keep that terminal outcome authoritative.
           if (setupFailureWrite.updated) {
-            await finalizeAgentStatus(run.agentId, "failed", message).catch(() => undefined);
+            await finalizeAgentStatus(run.agentId, "failed", message, {
+              // A worktree held by someone else says nothing about this agent's
+              // health. Erroring it here knocked it out of every project.
+              keepIdleOnFailure: executionWorkspaceLeaseConflict,
+            }).catch(() => undefined);
           }
         } finally {
           const latestRun = await getRun(run.id).catch(() => null);
