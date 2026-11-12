@@ -10,7 +10,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { createPostgresWakeQueueAdapter, createWakeAdmissionWriter } from "../../modules/wake-queue/adapters/postgres.js";
 import { createReleaseIssueExecution } from "../../modules/wake-queue/application/use-cases.js";
 import { closeProcessRunAdmission, resetProcessRunAdmissionForTests } from "./run-admission.js";
-import { createHeartbeatQueue, DEFERRED_WAKE_CONTEXT_KEY, shouldDeferFollowupWakeForSameIssue, shouldQueueFollowupForRunningIssueWake, type HeartbeatQueueDependencies } from "./queue.js";
+import { compareQueuedRunDispatchOrder, createHeartbeatQueue, DEFERRED_WAKE_CONTEXT_KEY, effectiveIssueRunPriorityRank, isStarvedQueuedRun, issueRunPriorityRank, shouldDeferFollowupWakeForSameIssue, shouldQueueFollowupForRunningIssueWake, STARVED_QUEUED_RUN_AFTER_MS, type HeartbeatQueueDependencies, type QueuedRunDispatchOrderCandidate } from "./queue.js";
 import { createWakeQueue } from "../../modules/wake-queue/index.js";
 import { TransactionScope } from "../../modules/wake-queue/application/ports.js";
 import { enrichWakeContextSnapshot, mergeCoalescedContextSnapshot } from "./run-preparation.js";
@@ -1093,5 +1093,159 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     expect(deps.releaseIssueExecutionAndPromote).toHaveBeenCalledWith(cancelled, { suppressImmediateRecovery: true });
     expect(deps.treeControlSvc.getActivePauseHoldGate).not.toHaveBeenCalled();
     expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+});
+
+// LAC-7917: run selection had no aging term, so on a saturated agent the low-priority tail
+// was never served. Measured on one agent: 155 runs started in 44.7h (86 high, 68 medium,
+// 1 critical, ZERO low) while 23 low-priority runs sat queued, and a queued run holding the
+// issue execution lock makes its issue permanently unwakeable.
+//
+// The comparator's ordering had no coverage at all before this block.
+describe("queued run dispatch ordering", () => {
+  const HOUR_MS = 60 * 60 * 1000;
+  const NOW = new Date("2026-11-12T12:00:00.000Z");
+  const waited = (hours: number, priority: string | null, readinessRank = 1): QueuedRunDispatchOrderCandidate =>
+    ({ readinessRank, priority, createdAt: new Date(NOW.getTime() - hours * HOUR_MS) });
+
+  /** Returns the candidate served first, and asserts the comparator is antisymmetric on the pair. */
+  function servedFirst(left: QueuedRunDispatchOrderCandidate, right: QueuedRunDispatchOrderCandidate) {
+    const forward = compareQueuedRunDispatchOrder(left, right, NOW);
+    const reverse = compareQueuedRunDispatchOrder(right, left, NOW);
+    expect(Math.sign(forward)).toBe(-Math.sign(reverse));
+    return forward <= 0 ? left : right;
+  }
+
+  it("serves a starved low ahead of a fresh medium", () => {
+    const starvedLow = waited(30, "low");
+    expect(servedFirst(starvedLow, waited(1, "medium"))).toBe(starvedLow);
+  });
+
+  it("lets a starved medium compete with a fresh high", () => {
+    const starvedMedium = waited(30, "medium");
+    expect(servedFirst(starvedMedium, waited(1, "high"))).toBe(starvedMedium);
+  });
+
+  it("keeps a fresh high ahead of a starved low, so promotion is one class and not age-first", () => {
+    const freshHigh = waited(1, "high");
+    expect(servedFirst(freshHigh, waited(30, "low"))).toBe(freshHigh);
+    // Same for the brand new critical incident the bound exists to protect.
+    const freshCritical = waited(0, "critical");
+    expect(servedFirst(freshCritical, waited(400, "medium"))).toBe(freshCritical);
+  });
+
+  it("floors promotion at critical, so the longer-waiting of two starved runs goes first", () => {
+    // Without the Math.max floor a starved critical ranks -1 and jumps a starved high that
+    // has waited longer. With it they compete in the same class and age decides.
+    const longerWaitingHigh = waited(40, "high");
+    expect(servedFirst(longerWaitingHigh, waited(30, "critical"))).toBe(longerWaitingHigh);
+  });
+
+  it("keeps aging out of the readiness rank", () => {
+    // Rank 3 is "dependencies not ready" and must stay last however long it has waited.
+    const readyLow = waited(0.1, "low", 1);
+    expect(servedFirst(waited(36, "critical", 3), readyLow)).toBe(readyLow);
+    // Rank 0 is "issue already in_progress" and must stay first.
+    const inProgressLow = waited(0.1, "low", 0);
+    expect(servedFirst(waited(36, "critical", 1), inProgressLow)).toBe(inProgressLow);
+  });
+
+  it("treats the starvation threshold as inclusive at 24h", () => {
+    expect(STARVED_QUEUED_RUN_AFTER_MS).toBe(24 * HOUR_MS);
+    expect(isStarvedQueuedRun(new Date(NOW.getTime() - STARVED_QUEUED_RUN_AFTER_MS), NOW)).toBe(true);
+    expect(isStarvedQueuedRun(new Date(NOW.getTime() - STARVED_QUEUED_RUN_AFTER_MS + 1), NOW)).toBe(false);
+    const freshMedium = waited(1, "medium");
+    const atThreshold = { readinessRank: 1, priority: "low", createdAt: new Date(NOW.getTime() - STARVED_QUEUED_RUN_AFTER_MS) };
+    const justUnder = { readinessRank: 1, priority: "low", createdAt: new Date(NOW.getTime() - STARVED_QUEUED_RUN_AFTER_MS + 1) };
+    expect(servedFirst(atThreshold, freshMedium)).toBe(atThreshold);
+    expect(servedFirst(justUnder, freshMedium)).toBe(freshMedium);
+  });
+
+  it("promotes exactly one class and no further", () => {
+    expect(effectiveIssueRunPriorityRank("low", false)).toBe(issueRunPriorityRank("low"));
+    expect(effectiveIssueRunPriorityRank("low", true)).toBe(issueRunPriorityRank("medium"));
+    expect(effectiveIssueRunPriorityRank("medium", true)).toBe(issueRunPriorityRank("high"));
+    expect(effectiveIssueRunPriorityRank("high", true)).toBe(issueRunPriorityRank("critical"));
+    expect(effectiveIssueRunPriorityRank("critical", true)).toBe(issueRunPriorityRank("critical"));
+    expect(effectiveIssueRunPriorityRank(null, true)).toBe(issueRunPriorityRank("low"));
+  });
+
+  it("leaves the ordering of runs that have not starved exactly as it was", () => {
+    const freshMedium = waited(2, "medium");
+    expect(servedFirst(freshMedium, waited(2, "low"))).toBe(freshMedium);
+    const olderLow = waited(5, "low");
+    expect(servedFirst(olderLow, waited(2, "low"))).toBe(olderLow);
+    const knownLow = waited(2, "low");
+    expect(servedFirst(knownLow, waited(2, null))).toBe(knownLow);
+    const freshCritical = waited(2, "critical");
+    expect(servedFirst(freshCritical, waited(2, "high"))).toBe(freshCritical);
+  });
+
+  it("serves the whole starved tail of a saturated queue before the fresh middle of it", () => {
+    const queue = [
+      waited(0.2, "high"),
+      waited(0.4, "medium"),
+      waited(30, "low"),
+      waited(0.1, "medium"),
+      waited(44.7, "low"),
+      waited(0.3, "high"),
+      waited(26, "medium"),
+    ];
+    const order = [...queue].sort((left, right) => compareQueuedRunDispatchOrder(left, right, NOW));
+    expect(order.map((run) => [run.priority, Math.round((NOW.getTime() - run.createdAt.getTime()) / HOUR_MS)])).toEqual([
+      ["medium", 26], // starved medium competes as high and is the oldest of that class
+      ["high", 0],
+      ["high", 0],
+      ["low", 45], // starved low competes as medium, oldest first
+      ["low", 30],
+      ["medium", 0],
+      ["medium", 0],
+    ]);
+    // The defect this fixes: every fresh medium used to precede every low, forever.
+    const firstLow = order.findIndex((run) => run.priority === "low");
+    const lastFreshMedium = order.map((run) => run.priority).lastIndexOf("medium");
+    expect(firstLow).toBeLessThan(lastFreshMedium);
+  });
+
+  it("orders identically to the literal effRank -> starved -> createdAt decision", () => {
+    // The shipped comparator leaves the explicit `starved` key out because it is provably
+    // redundant: starvation is age >= threshold against one `now`, so a starved run is
+    // always older than a fresh one and the createdAt key already orders it first. This
+    // pins that claim against the decision as written, over the exhaustive matrix, instead
+    // of carrying a branch no test could kill.
+    const literalRank = (priority: string | null | undefined) => {
+      switch (priority) {
+        case "critical": return 0;
+        case "high": return 1;
+        case "medium": return 2;
+        case "low": return 3;
+        default: return 4;
+      }
+    };
+    const literalSpec = (left: QueuedRunDispatchOrderCandidate, right: QueuedRunDispatchOrderCandidate, now: Date) => {
+      if (left.readinessRank !== right.readinessRank) return left.readinessRank - right.readinessRank;
+      const starved = (candidate: QueuedRunDispatchOrderCandidate) =>
+        now.getTime() - candidate.createdAt.getTime() >= 24 * HOUR_MS;
+      const effective = (candidate: QueuedRunDispatchOrderCandidate) =>
+        starved(candidate) ? Math.max(0, literalRank(candidate.priority) - 1) : literalRank(candidate.priority);
+      const leftEffective = effective(left);
+      const rightEffective = effective(right);
+      if (leftEffective !== rightEffective) return leftEffective - rightEffective;
+      if (starved(left) !== starved(right)) return starved(left) ? -1 : 1;
+      return left.createdAt.getTime() - right.createdAt.getTime();
+    };
+
+    const priorities = ["critical", "high", "medium", "low", null, "someday"];
+    const ages = [0, 1, 23.999, 24, 24.001, 30, 44.7, 400];
+    const candidates = priorities.flatMap((priority) =>
+      ages.flatMap((age) => [0, 1, 2, 3].map((readinessRank) => waited(age, priority, readinessRank))));
+    let compared = 0;
+    for (const left of candidates) {
+      for (const right of candidates) {
+        expect(Math.sign(compareQueuedRunDispatchOrder(left, right, NOW))).toBe(Math.sign(literalSpec(left, right, NOW)));
+        compared += 1;
+      }
+    }
+    expect(compared).toBe(candidates.length * candidates.length);
   });
 });

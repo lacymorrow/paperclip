@@ -379,6 +379,102 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/**
+ * A queued run counts as starved once it has waited this long.
+ *
+ * 24h, measured rather than picked (LAC-7917): on the saturated agent that motivated
+ * this, no high-priority run has ever waited past 18.5h (7-day maximum; p99 17.6h), so
+ * the promotion below can never delay genuinely urgent work. The wait distribution is
+ * bimodal, so 24h still captures 42 of the 46 runs a 6h threshold would have caught.
+ */
+export const STARVED_QUEUED_RUN_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** The top priority class. Aging may promote a run up to this, never past it. */
+const CRITICAL_RUN_PRIORITY_RANK = 0;
+
+export function issueRunPriorityRank(priority: string | null | undefined) {
+  switch (priority) {
+    case "critical":
+      return 0;
+    case "high":
+      return 1;
+    case "medium":
+      return 2;
+    case "low":
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+export function isStarvedQueuedRun(createdAt: Date, now: Date) {
+  return now.getTime() - createdAt.getTime() >= STARVED_QUEUED_RUN_AFTER_MS;
+}
+
+/**
+ * Priority rank with the aging term applied: a starved run competes one class up,
+ * floored at critical.
+ *
+ * Bounded to one class on purpose. Absolute age-first ordering would put a brand new
+ * critical incident behind every run that has already crossed the threshold, which on
+ * the queue that motivated this was 42 runs - roughly half a day at that agent's
+ * service rate. One class is enough to serve the starved tail in bounded time: a
+ * starved `low` competes as `medium` and, being older than any fresh `medium`, wins the
+ * age tiebreak against it.
+ */
+export function effectiveIssueRunPriorityRank(
+  priority: string | null | undefined,
+  starved: boolean,
+) {
+  const rank = issueRunPriorityRank(priority);
+  return starved ? Math.max(CRITICAL_RUN_PRIORITY_RANK, rank - 1) : rank;
+}
+
+export type QueuedRunDispatchOrderCandidate = {
+  /**
+   * Readiness rank: 0 the issue is already `in_progress`, 1 ready, 2 no issue bound,
+   * 3 dependencies not ready.
+   */
+  readinessRank: number;
+  priority: string | null | undefined;
+  createdAt: Date;
+};
+
+/**
+ * Order the queued runs an agent may start next.
+ *
+ * `readinessRank` is the first key and the aging term never reaches it. Rank 3
+ * (dependencies not ready) sorting last and rank 0 (the issue already `in_progress`)
+ * sorting first are correctness properties, not fairness ones, so aging applies
+ * strictly WITHIN a readiness rank.
+ *
+ * Within a rank the keys are effective priority, then age. The decision this implements
+ * (LAC-5604) writes that as `effRank -> starved -> createdAt`. The explicit `starved`
+ * key is left out because it is provably redundant, not because it was dropped:
+ * starvation is `age >= threshold` against a single `now`, so a starved run is always
+ * older than a fresh one and the `createdAt` key already orders it first. Leaving it in
+ * would add a branch no test could ever kill. `queue.test.ts` pins the equivalence
+ * against a literal three-key reference over the exhaustive priority x starved matrix.
+ */
+export function compareQueuedRunDispatchOrder(
+  left: QueuedRunDispatchOrderCandidate,
+  right: QueuedRunDispatchOrderCandidate,
+  now: Date,
+) {
+  if (left.readinessRank !== right.readinessRank)
+    return left.readinessRank - right.readinessRank;
+  const leftRank = effectiveIssueRunPriorityRank(
+    left.priority,
+    isStarvedQueuedRun(left.createdAt, now),
+  );
+  const rightRank = effectiveIssueRunPriorityRank(
+    right.priority,
+    isStarvedQueuedRun(right.createdAt, now),
+  );
+  if (leftRank !== rightRank) return leftRank - rightRank;
+  return left.createdAt.getTime() - right.createdAt.getTime();
+}
+
 export async function claimDueTimerHeartbeatForAgent(
   db: Db,
   agent: typeof agents.$inferSelect,
@@ -561,21 +657,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
   const claimDueTimerHeartbeat = (agent: typeof agents.$inferSelect, now: Date, intervalSec: number) =>
     claimDueTimerHeartbeatForAgent(db, agent, now, intervalSec);
-
-  function issueRunPriorityRank(priority: string | null | undefined) {
-    switch (priority) {
-      case "critical":
-        return 0;
-      case "high":
-        return 1;
-      case "medium":
-        return 2;
-      case "low":
-        return 3;
-      default:
-        return 4;
-    }
-  }
 
   async function listQueuedRunDependencyReadiness(
     companyId: string,
@@ -2277,6 +2358,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         );
       const issueById = new Map(issueRows.map((row) => [row.id, row]));
       const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
+      // One clock for the whole sort, so the comparator stays consistent (a `now` read
+      // per comparison can cross the starvation threshold mid-sort and order runs
+      // intransitively).
+      const orderingNow = new Date();
       const prioritizedRuns = [...queuedRuns].sort((left, right) => {
         const leftIssueId = readNonEmptyString(
           parseObject(left.contextSnapshot).issueId,
@@ -2312,12 +2397,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               : 1
             : 3
           : 2;
-        if (leftRank !== rightRank) return leftRank - rightRank;
-        const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
-        const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
-        if (leftPriorityRank !== rightPriorityRank)
-          return leftPriorityRank - rightPriorityRank;
-        return left.createdAt.getTime() - right.createdAt.getTime();
+        return compareQueuedRunDispatchOrder(
+          { readinessRank: leftRank, priority: leftIssue?.priority, createdAt: left.createdAt },
+          { readinessRank: rightRank, priority: rightIssue?.priority, createdAt: right.createdAt },
+          orderingNow,
+        );
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
