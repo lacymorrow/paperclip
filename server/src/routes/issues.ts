@@ -307,6 +307,10 @@ import {
   findExistingIssueBlockersResolvedWakeForReadyState,
   shouldWakeOnRestoredBlockedDependency,
 } from "../services/issue-dependency-wakeups.js";
+import {
+  DEPENDENCY_READY_UNBLOCK_STATUS,
+  unblockDependencyReadyIssue,
+} from "../services/dependency-ready-unblock.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
   executionWorkspaceService as executionWorkspaceServiceDirect,
@@ -15906,6 +15910,7 @@ export function issueRoutes(
           resolvedBlockerIssueId: string;
           blockerIssueIds: string[];
           blockedTransitionAt?: Date | string | null;
+          dependentStatus?: string | null;
           source: string;
           mutation: string;
         }) => {
@@ -15921,6 +15926,7 @@ export function issueRoutes(
                 dependentIssueId: input.dependentIssueId,
                 blockerIssueIds: input.blockerIssueIds,
                 blockedTransitionAt: input.blockedTransitionAt,
+                dependentStatus: input.dependentStatus,
               });
             if (existingWake) return;
           } catch (err) {
@@ -16113,12 +16119,41 @@ export function issueRoutes(
         if (becameDone) {
           const dependents = await svc.listWakeableBlockedDependents(issue.id);
           for (const dependent of dependents) {
+            // Write the transition, do not only ask for it. A wake alone leaves
+            // the dependent `blocked`, the one status every sweep and every
+            // agent reads as "not my turn", so it parked forever whenever the
+            // woken agent did not move it itself.
+            //
+            // No self-blocked skip here, unlike the backstop. The backstop
+            // skips an assignee that opened the current blocked cycle because
+            // it re-wakes on a timer and would loop: wake, re-block, new
+            // cycle, wake. This path fires once, on the edge where the final
+            // blocker actually reached `done`. The assignee's recorded
+            // blockers were not all resolved when it blocked, so the
+            // transition is new information and runs at most once per edge.
+            const unblock = await unblockDependencyReadyIssue(
+              db,
+              {
+                companyId: issue.companyId,
+                issueId: dependent.id,
+                blockerIssueIds: dependent.blockerIssueIds,
+                source: "issue.blockers_resolved",
+                runId: actor.runId ?? null,
+                agentId: dependent.assigneeAgentId,
+                actorType: actor.actorType,
+                actorId: actor.actorId,
+              },
+              { issuesSvc: svc },
+            );
             await addDependencyResolvedWakeup({
               agentId: dependent.assigneeAgentId,
               dependentIssueId: dependent.id,
               resolvedBlockerIssueId: issue.id,
               blockerIssueIds: dependent.blockerIssueIds,
               blockedTransitionAt: dependent.blockedTransitionAt,
+              dependentStatus: unblock.unblocked
+                ? DEPENDENCY_READY_UNBLOCK_STATUS
+                : "blocked",
               source: "issue.blockers_resolved",
               mutation: "blocker_done",
             });
@@ -19558,6 +19593,7 @@ export function issueRoutes(
           resolvedBlockerIssueId: string;
           blockerIssueIds: string[];
           blockedTransitionAt?: Date | string | null;
+          dependentStatus?: string | null;
         }) => {
           const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
             dependentIssueId: input.dependentIssueId,
@@ -19571,6 +19607,7 @@ export function issueRoutes(
                 dependentIssueId: input.dependentIssueId,
                 blockerIssueIds: input.blockerIssueIds,
                 blockedTransitionAt: input.blockedTransitionAt,
+                dependentStatus: input.dependentStatus,
               });
             if (existingWake) return;
           } catch (err) {
@@ -19729,12 +19766,31 @@ export function issueRoutes(
             currentIssue.id,
           );
           for (const dependent of dependents) {
+            // Same reason as the issue-update path: readiness has to move the
+            // issue, the wake is only the notification.
+            const unblock = await unblockDependencyReadyIssue(
+              db,
+              {
+                companyId: currentIssue.companyId,
+                issueId: dependent.id,
+                blockerIssueIds: dependent.blockerIssueIds,
+                source: "issue.comment.blockers_resolved",
+                runId: actor.runId ?? null,
+                agentId: dependent.assigneeAgentId,
+                actorType: actor.actorType,
+                actorId: actor.actorId,
+              },
+              { issuesSvc: svc },
+            );
             await addDependencyResolvedWakeup({
               agentId: dependent.assigneeAgentId,
               dependentIssueId: dependent.id,
               resolvedBlockerIssueId: currentIssue.id,
               blockerIssueIds: dependent.blockerIssueIds,
               blockedTransitionAt: dependent.blockedTransitionAt,
+              dependentStatus: unblock.unblocked
+                ? DEPENDENCY_READY_UNBLOCK_STATUS
+                : "blocked",
             });
           }
         }
