@@ -8,6 +8,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import type { CurrentUserRedactionOptions } from "../../log-redaction.js";
 import { publishLiveEvent } from "../live-events.js";
 import { getHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.js";
+import { readProcessStartedAt } from "../hot-restart.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import { heartbeatService } from "../heartbeat.js";
 import { createHeartbeatRunPreparation } from "./run-preparation.js";
@@ -209,6 +210,33 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     });
     expect(persisted?.processStartedAt?.toISOString()).toBe(remoteBirth);
     expect(persisted?.processPid).toBe(process.pid);
+  });
+
+  it("prefers the operating-system process birth over the spawn wall clock", async () => {
+    const { run } = await fixture();
+    // Pins the contract the recycle checks depend on: the persisted identity
+    // must come from the same reader they use. This held before the unreadable
+    // case was fixed, so it is a characterisation test, not the regression.
+    const spawnWallClock = new Date(Date.now() - 60_000).toISOString();
+    const persisted = await persistHeartbeatRunProcessMetadata(db, run.id, {
+      pid: process.pid, processGroupId: null, startedAt: spawnWallClock, targetKind: "local",
+    });
+    expect(persisted?.processStartedAt?.toISOString()).toBe(await readProcessStartedAt(process.pid));
+    expect(persisted?.processStartedAt?.toISOString()).not.toBe(spawnWallClock);
+  });
+
+  it("records no process birth for an unreadable local identity so the ownership hold survives", async () => {
+    const { run } = await fixture();
+    // The regression for LAC-7951. Larger than any possible PID, so the reader
+    // fails the way it does for a process whose identity cannot be read. An
+    // absent birth keeps the hold, because every recycle check skips an absent
+    // one; the old wall-clock fallback guaranteed a mismatch and dropped it.
+    const unreadablePid = 2_147_483_647;
+    const persisted = await persistHeartbeatRunProcessMetadata(db, run.id, {
+      pid: unreadablePid, processGroupId: null, startedAt: new Date().toISOString(), targetKind: "local",
+    });
+    expect(persisted?.processPid).toBe(unreadablePid);
+    expect(persisted?.processStartedAt).toBeNull();
   });
 
   it("keeps one terminal outcome and reports only the winner of competing writes", async () => {

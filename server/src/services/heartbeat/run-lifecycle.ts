@@ -606,6 +606,26 @@ export async function retryTransientRunWrite<T>(write: () => Promise<T>, attempt
   }
 }
 
+/**
+ * Picks the process-start identity to persist for a spawned run.
+ *
+ * Returns null for a local target whose operating-system start time could not
+ * be read, because an identity that did not come from `readProcessStartedAt`
+ * can never match the value the recycle checks read back.
+ */
+function resolveRecordedProcessStart(
+  meta: { startedAt: string; targetKind: "local" | "remote" },
+  observedStartedAt: string | null,
+): Date | null {
+  if (meta.targetKind === "remote") {
+    const spawnedAt = new Date(meta.startedAt);
+    return Number.isNaN(spawnedAt.getTime()) ? new Date() : spawnedAt;
+  }
+  if (observedStartedAt === null) return null;
+  const observed = new Date(observedStartedAt);
+  return Number.isNaN(observed.getTime()) ? null : observed;
+}
+
 export async function persistHeartbeatRunProcessMetadata(
   db: Db,
   runId: string,
@@ -615,8 +635,19 @@ export async function persistHeartbeatRunProcessMetadata(
   const observedStartedAt = meta.targetKind === "remote" ? null : await readProcessStartedAt(meta.pid).catch(
     () => null,
   );
-  const startedAt = new Date(observedStartedAt ?? meta.startedAt);
-  const processStartedAt = Number.isNaN(startedAt.getTime()) ? new Date() : startedAt;
+  // A local process identity is only comparable when it comes from the same
+  // reader the recycle checks use. `meta.startedAt` is wall clock sampled in
+  // the parent after spawn, while `readProcessStartedAt` floors to the second
+  // on macOS and the BSDs, so recording the wall clock locally would guarantee
+  // a later mismatch and silently drop a live process's ownership hold.
+  // Record no identity instead: every recycle check skips an absent one and
+  // keeps the hold, which is the conservative direction those checks document.
+  //
+  // A remote target keeps the wall clock unchanged. Both check sites already
+  // skip host PID checks for a run whose leases are remote, so this value is
+  // only a second line of defence against a local PID that happens to collide
+  // with a sandbox PID: it can never equal a local `ps` reading.
+  const processStartedAt = resolveRecordedProcessStart(meta, observedStartedAt);
   return db.transaction(async tx => {
     const [binding] = await tx
       .select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId })
@@ -634,7 +665,11 @@ export async function persistHeartbeatRunProcessMetadata(
       message: "Process identity recorded; prior stop evidence no longer applies.",
       payload: { targetKind: meta.targetKind ?? "local", hostname: os.hostname(),
         processPid: meta.pid, processGroupId: meta.processGroupId,
-        processStartedAt: processStartedAt.toISOString() },
+        processStartedAt: processStartedAt?.toISOString() ?? null,
+        // Names why an identity is absent, so an operator reading the event
+        // can tell an unreadable local process from a remote target.
+        processStartedAtSource: meta.targetKind === "remote" ? "spawn_wall_clock"
+          : processStartedAt ? "operating_system" : "unreadable" },
       runUpdate: {
         legacyProcessSettlement: null,
         processPid: meta.pid,
