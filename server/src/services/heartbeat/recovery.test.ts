@@ -675,9 +675,13 @@ describePostgres("heartbeat recovery module ownership", () => {
   it.each(["missing", "new_launch", "wrong_birth", "foreign_host", "wrong_agent", "wrong_pid", "wrong_group", "native_source", "remote_workspace", "remote_lease"] as const)(
     "holds a native PID without local authority: %s", async evidence => {
       const child = await ownedProcess();
-      await child.stop();
+      // Record the identity while the process is alive, the way a real spawn
+      // does. `readProcessStartedAt` only answers for a live pid, and since
+      // LAC-7951 an unreadable birth records none at all - which would hold
+      // every case here for that reason instead of the one it names.
       const f = await nativeProcessFixture(child.pid, "local", "failed");
       try {
+        await child.stop();
         if (evidence === "missing") await db.delete(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, f.run.id));
         if (evidence === "new_launch") await appendHeartbeatRunEvent(db, { companyId: f.run.companyId,
           runId: f.run.id, agentId: f.run.agentId, eventType: PROCESS_START_REQUESTED });
@@ -703,6 +707,10 @@ describePostgres("heartbeat recovery module ownership", () => {
         if (evidence === "remote_lease") await db.insert(environmentLeases).values({ companyId: f.run.companyId,
           heartbeatRunId: f.run.id, issueId: f.run.issueId, status: "active", provider: "daytona", providerLeaseId: randomUUID() });
         const before = await f.current();
+        // Without a recorded birth every case below would hold the PID for the
+        // missing birth instead of the evidence it names, so each one would
+        // pass vacuously. Pin it.
+        expect(before.processStartedAt).not.toBeNull();
         await createHeartbeatRecovery(db, f.deps).reapOrphanedRuns();
         expect(await f.current()).toMatchObject({ processPid: child.pid, processGroupId: child.pid,
           processStartedAt: before.processStartedAt, errorCode: "native_session_interrupted" });
@@ -715,9 +723,11 @@ describePostgres("heartbeat recovery module ownership", () => {
 
   it("clears a verified stopped local retry identity and records its stop", async () => {
     const child = await ownedProcess();
-    await child.stop();
+    // A verified stop needs an identity recorded while the process was alive
+    // (LAC-7951); recording it after the exit leaves no birth to verify.
     const f = await nativeProcessFixture(child.pid, "local", "failed");
     try {
+      await child.stop();
       await createHeartbeatRecovery(db, f.deps).reapOrphanedRuns();
       expect(await f.current()).toMatchObject({ processPid: null, processGroupId: null, processStartedAt: null });
       expect(await hasNativeLocalProcessStop(db, f.run.companyId, f.run.id)).toBe(true);

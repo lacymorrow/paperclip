@@ -325,6 +325,34 @@ function spawnAliveProcess() {
   });
 }
 
+/**
+ * A child spawned the way a local run's process is: detached, so it leads its
+ * own process group and `resolveProcessGroupId` reports a group equal to its
+ * PID (`packages/adapter-utils/src/server-utils.ts`).
+ */
+function spawnOwnedProcess() {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  const pid = child.pid!;
+  return {
+    pid,
+    async stop() {
+      await new Promise<void>((resolve) => {
+        child.once("exit", () => resolve());
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          resolve();
+        }
+      });
+      await waitForPidExit(pid);
+    },
+  };
+}
+
 function isPidAlive(pid: number | null | undefined) {
   if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0)
     return false;
@@ -2428,7 +2456,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   async function seedPendingNativeFinalization(accept = true) {
-    const fixture = await seedRunFixture({ runtimeMode: "native", adapterType: "paperclip_runner", processPid: 2_000_000_000 });
+    // A local identity is recorded while the process is alive and detached, so
+    // its group equals its PID. Since LAC-7951 an unreadable birth records no
+    // identity at all, so a synthetic PID can no longer stand in for a process
+    // that has exited - it would leave the run with no birth and no verifiable
+    // stop, holding its PID for a reason none of these tests is about.
+    const owned = spawnOwnedProcess();
+    const fixture = await seedRunFixture({ runtimeMode: "native", adapterType: "paperclip_runner", processPid: owned.pid });
     const { companyId, agentId, issueId, runId } = fixture;
     const contractId = randomUUID(), runnerInstanceId = randomUUID();
     const contractSha = `finalization-contract-${runId}`;
@@ -2461,8 +2495,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           updatedAt: new Date(0),
         }).returning())[0].id }
       : await seedEnvironmentLeaseFixture(fixture);
-    await persistHeartbeatRunProcessMetadata(db, runId, { pid: 2_000_000_000, processGroupId: null,
+    await persistHeartbeatRunProcessMetadata(db, runId, { pid: owned.pid, processGroupId: owned.pid,
       startedAt: new Date(0).toISOString(), targetKind: "local" });
+    await owned.stop();
     return { ...fixture, ...lease, complete };
   }
 
@@ -3303,14 +3338,19 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("does not grant a dead native run legacy retry authority after adapter reassignment", async () => {
+    // Recorded while alive and detached, then stopped: a birth that was never
+    // readable records no identity (LAC-7951) and would hold the PID for that
+    // reason rather than for the adapter reassignment this test is about.
+    const owned = spawnOwnedProcess();
     const { agentId, runId } = await seedRunFixture({
       adapterType: "paperclip_runner",
       runtimeMode: "native",
-      processPid: 999_999_999,
+      processPid: owned.pid,
       includeIssue: false,
     });
-    await persistHeartbeatRunProcessMetadata(db, runId, { pid: 999_999_999, processGroupId: null,
+    await persistHeartbeatRunProcessMetadata(db, runId, { pid: owned.pid, processGroupId: owned.pid,
       startedAt: new Date().toISOString(), targetKind: "local" });
+    await owned.stop();
     // The persisted run remains native even after the agent's current adapter
     // changes to one that normally owns a legacy local child.
     await db
