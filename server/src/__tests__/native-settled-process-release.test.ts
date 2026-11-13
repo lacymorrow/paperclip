@@ -144,21 +144,47 @@ suite("settled native run process identity", () => {
   const readRun = (runId: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then(rows => rows[0]!);
 
   it("releases a failed native run's local identity with a stop receipt once its process is gone", async () => {
+    // `exitedPid()` is already gone when the identity is recorded, so since
+    // LAC-7951 there is no readable birth and none is stored. The release runs
+    // on the isolated-process-group half of the settled-identity condition and
+    // the receipt records the absent birth rather than inventing one.
     const { runId, pid } = await seed();
-    expect(await readRun(runId)).toMatchObject({ processPid: pid, processGroupId: pid });
-    const before = await readRun(runId);
+    expect(await readRun(runId)).toMatchObject({ processPid: pid, processGroupId: pid, processStartedAt: null });
     expect(await releaseSettledNativeRunProcess(db, runId)).toBe("released");
     const after = await readRun(runId);
     expect(after).toMatchObject({ status: "failed", processPid: null, processGroupId: null, processStartedAt: null });
     expect(await hasNativeLocalProcessStop(db, companyId, runId)).toBe(true);
+    // `readNativeLocalProcessStop` omits the key rather than reporting null,
+    // so the receipt carries the PID pair and no birth at all.
+    expect(await readNativeLocalProcessStop(db, companyId, runId)).toEqual({
+      processPid: pid, processGroupId: pid,
+    });
+    expect(await withReleasedNativeRunProcess(db, after)).toMatchObject({
+      processPid: pid, processGroupId: pid, processStartedAt: null,
+    });
+    expect(await releaseSettledNativeRunProcess(db, runId)).toBe("skipped");
+  });
+
+  it("carries the operating-system process birth into the stop receipt when one was readable", async () => {
+    // The other half of the pair above: an identity recorded while the process
+    // was alive has a real birth from `readProcessStartedAt`, and the receipt
+    // and the reconstructed row both have to carry that exact value.
+    const child = startDetached();
+    children.push(child);
+    const { runId, pid } = await seed({ pid: child.pid! });
+    const before = await readRun(runId);
+    expect(before.processStartedAt).not.toBeNull();
+    await new Promise<void>(resolve => { child.once("exit", () => resolve()); process.kill(-child.pid!, "SIGKILL"); });
+    expect(await releaseSettledNativeRunProcess(db, runId)).toBe("released");
+    const after = await readRun(runId);
+    expect(after).toMatchObject({ processPid: null, processGroupId: null, processStartedAt: null });
     expect(await readNativeLocalProcessStop(db, companyId, runId)).toEqual({
       processPid: pid, processGroupId: pid, processStartedAt: before.processStartedAt!.toISOString(),
     });
     expect(await withReleasedNativeRunProcess(db, after)).toMatchObject({
       processPid: pid, processGroupId: pid, processStartedAt: before.processStartedAt,
     });
-    expect(await releaseSettledNativeRunProcess(db, runId)).toBe("skipped");
-  });
+  }, 30_000);
 
   it("releases the identity from the periodic recovery sweep", async () => {
     const { runId } = await seed({ status: "timed_out" });

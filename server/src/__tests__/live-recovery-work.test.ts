@@ -516,7 +516,17 @@ describe("residual recovery production matrix", () => {
     } finally { db.$client.options.debug = prior; }
     expect(await getRun(run.id)).toMatchObject({ processPid: pid, processStartedAt: null });
     await quiet();
+    // An unreadable local birth records no identity at all (LAC-7951), so a
+    // spawn that also reports no process group - win32, or a runner that shares
+    // the parent's group - still has nothing the release path can verify and
+    // keeps its ownership hold.
     await persistHeartbeatRunProcessMetadata(db, run.id, { pid, processGroupId: null, startedAt: startedAt.toISOString(), targetKind: "local" });
+    await advance(31_000);
+    expect(await getRun(run.id)).toMatchObject({ processPid: pid, processGroupId: null, processStartedAt: null });
+    await quiet();
+    // An isolated process group is the identity a null birth can be released
+    // on: PID equals group and the recorded event agrees with the run row.
+    await persistHeartbeatRunProcessMetadata(db, run.id, { pid, processGroupId: pid, startedAt: startedAt.toISOString(), targetKind: "local" });
     await advance(1_000);
     await vi.waitFor(async () => expect((await getRun(run.id)).processPid).toBeNull());
     expect(await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, run.id),
