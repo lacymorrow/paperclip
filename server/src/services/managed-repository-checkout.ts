@@ -14,6 +14,20 @@ import { measureRunPhase, recordRepositoryObjectCacheDetail } from "./execution-
 import { resolveRepositoryObjectCache, readRepositoryObjectCache, publishRepositoryObjectCache } from "./repository-object-cache.js";
 
 const execFile = promisify(execFileCallback);
+
+// Directories that Paperclip itself creates inside a working tree. They hold
+// per-issue worktrees, nested managed clones and runtime state, so they are
+// generated output and never source. Each pattern matches at any depth: a
+// nested worktree holds a nested clone which holds a worktree of its own, and
+// a root-anchored exclusion lets every level below the first back in. The
+// ignore data cannot stand in for this, because `git ls-files` does not
+// descend into a nested checkout and so reports nothing about the
+// `node_modules` inside one.
+const PAPERCLIP_STATE_EXCLUDES = [
+  "*/.paperclip/worktrees/*",
+  "*/.paperclip-runtime/*",
+  `*/${PROJECT_REPOSITORIES_DIR}/*`,
+];
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 
 type ManagedRepositoryPreparationFailure = { code: string | number | null; timedOut: boolean };
@@ -184,7 +198,7 @@ export async function materializeManagedProjectWorkspace(
       if (!snapshot) throw new Error("Configured repository folder is not a Git checkout");
       let baseline;
       try {
-        baseline = await captureDirectorySnapshot(cloneTmpDir, { exclude: [".git", ".paperclip-runtime", PROJECT_REPOSITORIES_DIR], ignoredPaths: snapshot.ignoredPaths, diskBacked: true });
+        baseline = await captureDirectorySnapshot(cloneTmpDir, { exclude: [".git", ...PAPERCLIP_STATE_EXCLUDES], ignoredPaths: snapshot.ignoredPaths, diskBacked: true });
         await mergeDirectoryWithBaseline({ baseline, sourceDir: input.localSource, targetDir: cloneTmpDir });
       } finally {
         if (baseline) await disposeDirectorySnapshot(baseline);
