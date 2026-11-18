@@ -160,4 +160,66 @@ describe("managed checkout source overlay", () => {
     expect(await readFile(path.join(target, ".paperclip", "config.json"), "utf8")).toBe("{}\n");
     expect(await readFile(path.join(target, "source.txt"), "utf8")).toBe("initial\n");
   });
+
+  it("leaves a worktree under a configured parent directory out of a prepared checkout", async () => {
+    const { source, target } = await sourceWithLocalState();
+    // `worktreeParentDir` is configurable, so Paperclip's execution worktrees do
+    // not always sit under `.paperclip`. This one is an ordinary untracked
+    // directory beside the source files, which is what the overlay walks.
+    const worktree = path.join(source, "agent-worktrees", "task-1");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-1", worktree]);
+    await mkdir(path.join(worktree, "node_modules"), { recursive: true });
+    await writeFile(path.join(worktree, "node_modules", "payload.txt"), "build output\n");
+
+    expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
+    expect(await stat(path.join(target, "agent-worktrees", "task-1")).catch(() => null)).toBeNull();
+    // The parent directory is ordinary untracked content and can hold anything, so
+    // the exclusion names the worktree and leaves an empty directory behind.
+    expect(await readdir(path.join(target, "agent-worktrees"))).toEqual([]);
+    // The overlay reads the source folder, so the worktree itself survives.
+    expect(await readFile(path.join(worktree, "node_modules", "payload.txt"), "utf8")).toBe("build output\n");
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
+
+  it("still overlays a plain directory that only looks like a worktree parent", async () => {
+    const { source, target } = await sourceWithLocalState();
+    // The exclusion comes from what Git reports as a linked worktree, not from a
+    // directory name, so ordinary untracked work keeps reaching the checkout.
+    await mkdir(path.join(source, "agent-worktrees", "task-1"), { recursive: true });
+    await writeFile(path.join(source, "agent-worktrees", "task-1", "notes.txt"), "local\n");
+    await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source });
+    expect(await readFile(path.join(target, "agent-worktrees", "task-1", "notes.txt"), "utf8")).toBe("local\n");
+  });
+  it("keeps the files of a registered worktree whose .git link is gone", async () => {
+    const { source, target } = await sourceWithLocalState();
+    // A half-cleaned worktree is still listed by Git but holds no Git metadata. It
+    // is ordinary directory content and may hold uncommitted work, so it must reach
+    // the prepared checkout rather than be treated as a worktree to leave out.
+    const worktree = path.join(source, "agent-worktrees", "task-2");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-2", worktree]);
+    await writeFile(path.join(worktree, "unsaved.txt"), "real work\n");
+    await rm(path.join(worktree, ".git"));
+    await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source });
+    expect(await readFile(path.join(target, "agent-worktrees", "task-2", "unsaved.txt"), "utf8")).toBe("real work\n");
+  });
+
+  it("prepares a checkout when a registered worktree directory no longer exists", async () => {
+    const { source, target } = await sourceWithLocalState();
+    const worktree = path.join(source, "agent-worktrees", "task-3");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-3", worktree]);
+    await rm(worktree, { recursive: true, force: true });
+    expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
+
+  it("leaves a registered worktree out when the source is reached through a symlink", async () => {
+    const { source, target } = await sourceWithLocalState();
+    const worktree = path.join(source, "agent-worktrees", "task-4");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-4", worktree]);
+    const alias = path.join(path.dirname(source), "source-alias");
+    await symlink(source, alias);
+    await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: alias });
+    expect(await stat(path.join(target, "agent-worktrees", "task-4")).catch(() => null)).toBeNull();
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
 });
