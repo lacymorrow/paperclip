@@ -347,6 +347,36 @@ const GIT_SENSITIVE_LOCAL_ADAPTER_TYPES = new Set([
 ]);
 export const MAX_TURN_CONTINUATION_RETRY_REASON = "max_turns_continuation";
 export const MAX_TURN_CONTINUATION_WAKE_REASON = "max_turns_continuation_retry";
+
+// LAC-8577: the run dispatched by a cap-death retry was told nothing about the death. The
+// retry's context carries this note; the wake payload surfaces it through the existing
+// `livenessContinuation` prompt channel, for the cap wake reason and no other.
+const MAX_TURN_CONTINUATION_INSTRUCTION =
+  "The previous run on this task died at the turn cap (max_turns_exhausted). A fresh run that re-derives the same traversal dies in the same place, so narrow or split before you work this: bank a durable write by turn 60, start no new heavy step after it, and if the task cannot finish inside one turn budget, split it and say which half you did. This is not a blocker and nobody is waiting on it; if your task on this wake is genuinely small or different, say so in one line and proceed.";
+
+export function buildMaxTurnContinuationNote(input: { attempt: number; maxAttempts: number; sourceRunId: string }) {
+  return {
+    attempt: input.attempt,
+    maxAttempts: input.maxAttempts,
+    sourceRunId: input.sourceRunId,
+    state: "max_turns_exhausted",
+    instruction: MAX_TURN_CONTINUATION_INSTRUCTION,
+  };
+}
+
+export function readMaxTurnContinuationForWake(contextSnapshot: Record<string, unknown>) {
+  if (contextSnapshot.wakeReason !== MAX_TURN_CONTINUATION_WAKE_REASON) return null;
+  const note = parseObject(contextSnapshot.maxTurnContinuation);
+  if (Object.keys(note).length === 0) return null;
+  return {
+    attempt: note.attempt,
+    maxAttempts: note.maxAttempts,
+    sourceRunId: readNonEmptyString(note.sourceRunId),
+    state: readNonEmptyString(note.state),
+    reason: null,
+    instruction: readNonEmptyString(note.instruction),
+  };
+}
 const MAX_TURN_CONTINUATION_DEFAULT_MAX_ATTEMPTS = 2;
 const MAX_TURN_CONTINUATION_MAX_ATTEMPTS_CAP = 10;
 const MAX_TURN_CONTINUATION_DEFAULT_DELAY_MS = 1_000;
@@ -4292,7 +4322,7 @@ export async function buildPaperclipWakePayload(input: {
           reason: readNonEmptyString(input.contextSnapshot.livenessContinuationReason),
           instruction: readNonEmptyString(input.contextSnapshot.livenessContinuationInstruction),
         }
-      : null,
+      : readMaxTurnContinuationForWake(input.contextSnapshot),
     interactionKind,
     interactionStatus,
     checkboxSelection: Object.keys(checkboxSelection).length > 0 ? checkboxSelection : null,
@@ -8485,6 +8515,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       wakeReason,
       retryReason,
       ...(transientRecovery ? { errorFamily: transientRecovery.errorFamily } : {}),
+      ...(retryReason === MAX_TURN_CONTINUATION_RETRY_REASON
+        ? { maxTurnContinuation: buildMaxTurnContinuationNote({ attempt: schedule.attempt, maxAttempts, sourceRunId: run.id }) }
+        : {}),
       scheduledRetryAttempt: schedule.attempt,
       scheduledRetryAt: schedule.dueAt.toISOString(),
       ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
