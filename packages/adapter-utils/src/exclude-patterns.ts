@@ -9,6 +9,19 @@ function pathContainsSegmentOrDescendant(relative: string, segment: string): boo
     relative.includes(`/${segment}/`);
 }
 
+/**
+ * `excludePatternMatches` reads a pattern whose first or last segment is `*` as
+ * "this path segment at any depth", and the grammar carries no escape form. A
+ * literal path that happens to have that shape - a real directory named `*` at
+ * its start or end - can therefore not be expressed as an exclusion at all:
+ * used as a pattern it would also match unrelated siblings. A caller deriving a
+ * pattern from a real path has to leave such a path out rather than widen the
+ * exclusion.
+ */
+export function isReservedExcludePatternShape(pattern: string): boolean {
+  return pattern.startsWith("*/") || pattern.endsWith("/*");
+}
+
 export function excludePatternMatches(relative: string, pattern: string): boolean {
   if (pattern.startsWith("*/") && pattern.endsWith("/*")) {
     return pathContainsSegmentOrDescendant(relative, pattern.slice(2, -2));

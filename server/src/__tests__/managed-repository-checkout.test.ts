@@ -1,10 +1,11 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, stat, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { materializeManagedProjectWorkspace, ensureManagedRepositoriesIgnored, readManagedRepositoryPreparationFailure } from "../services/managed-repository-checkout.js";
+import { logger } from "../middleware/logger.js";
 
 const execFile = promisify(execFileCallback);
 const directories: string[] = [];
@@ -210,6 +211,58 @@ describe("managed checkout source overlay", () => {
     await rm(worktree, { recursive: true, force: true });
     expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
     expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
+
+  it("leaves a registered worktree out when its path contains a newline", async () => {
+    const { source, target } = await sourceWithLocalState();
+    // `git worktree list --porcelain` writes such a path verbatim, so a line-based
+    // parse recovers only the fragment before the newline and the real worktree
+    // reaches the checkout. NUL-terminated output keeps the path whole.
+    const worktree = path.join(source, "agent-worktrees", "task\n5");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-5", worktree]);
+    await mkdir(path.join(worktree, "node_modules"), { recursive: true });
+    await writeFile(path.join(worktree, "node_modules", "payload.txt"), "build output\n");
+    expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
+    expect(await stat(path.join(target, "agent-worktrees", "task\n5")).catch(() => null)).toBeNull();
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
+
+  it.each([
+    { label: "its last segment is `*`", segments: ["agent-worktrees", "*"], sibling: ["agent-worktrees", "notes.txt"] },
+    { label: "its first segment is `*`", segments: ["*", "task-7"], sibling: ["vendored", "task-7", "notes.txt"] },
+  ])("keeps sibling source work when a registered worktree cannot be named as an exclusion because $label", async ({ segments, sibling }) => {
+    const { source, target } = await sourceWithLocalState();
+    // The pattern grammar reads a first or last segment of `*` as that segment at
+    // any depth and has no escape form, so naming this worktree as an exclusion
+    // would drop the sibling below. It stays in the overlay instead.
+    const worktree = path.join(source, ...segments);
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-6", worktree]);
+    await mkdir(path.join(source, ...sibling.slice(0, -1)), { recursive: true });
+    await writeFile(path.join(source, ...sibling), "local\n");
+    expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
+    expect(await readFile(path.join(target, ...sibling), "utf8")).toBe("local\n");
+  });
+
+  it("warns and overlays every registered worktree when the worktree listing fails", async () => {
+    const { source, target } = await sourceWithLocalState();
+    const worktree = path.join(source, "agent-worktrees", "task-8");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-8", worktree]);
+    await writeFile(path.join(worktree, "listed.txt"), "worktree work\n");
+    // Only `git worktree list` fails; every other Git call the preparer makes has
+    // to keep working, so the shim forwards them to the real binary.
+    const realGit = (await execFile("sh", ["-c", "command -v git"])).stdout.trim();
+    const shim = path.join(path.dirname(source), "failing-git");
+    await mkdir(shim, { recursive: true });
+    await writeFile(path.join(shim, "git"),
+      `#!/bin/sh\ncase " $* " in *" worktree list "*) echo "fixture: worktree list unavailable" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`);
+    await chmod(path.join(shim, "git"), 0o755);
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    vi.stubEnv("PATH", `${shim}:${process.env.PATH ?? ""}`);
+    await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source });
+    expect(warning).toHaveBeenCalledWith(expect.objectContaining({ localSource: source }),
+      expect.stringContaining("git worktree list failed"));
+    // Fail open: without the listing the worktree is ordinary content again.
+    expect(await readFile(path.join(target, "agent-worktrees", "task-8", "listed.txt"), "utf8")).toBe("worktree work\n");
   });
 
   it("leaves a registered worktree out when the source is reached through a symlink", async () => {
