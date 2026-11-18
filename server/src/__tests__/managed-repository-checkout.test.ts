@@ -190,4 +190,36 @@ describe("managed checkout source overlay", () => {
     await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source });
     expect(await readFile(path.join(target, "agent-worktrees", "task-1", "notes.txt"), "utf8")).toBe("local\n");
   });
+  it("keeps the files of a registered worktree whose .git link is gone", async () => {
+    const { source, target } = await sourceWithLocalState();
+    // A half-cleaned worktree is still listed by Git but holds no Git metadata. It
+    // is ordinary directory content and may hold uncommitted work, so it must reach
+    // the prepared checkout rather than be treated as a worktree to leave out.
+    const worktree = path.join(source, "agent-worktrees", "task-2");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-2", worktree]);
+    await writeFile(path.join(worktree, "unsaved.txt"), "real work\n");
+    await rm(path.join(worktree, ".git"));
+    await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source });
+    expect(await readFile(path.join(target, "agent-worktrees", "task-2", "unsaved.txt"), "utf8")).toBe("real work\n");
+  });
+
+  it("prepares a checkout when a registered worktree directory no longer exists", async () => {
+    const { source, target } = await sourceWithLocalState();
+    const worktree = path.join(source, "agent-worktrees", "task-3");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-3", worktree]);
+    await rm(worktree, { recursive: true, force: true });
+    expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
+
+  it("leaves a registered worktree out when the source is reached through a symlink", async () => {
+    const { source, target } = await sourceWithLocalState();
+    const worktree = path.join(source, "agent-worktrees", "task-4");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-4", worktree]);
+    const alias = path.join(path.dirname(source), "source-alias");
+    await symlink(source, alias);
+    await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: alias });
+    expect(await stat(path.join(target, "agent-worktrees", "task-4")).catch(() => null)).toBeNull();
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
 });
