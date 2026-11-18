@@ -29,6 +29,45 @@ const PAPERCLIP_STATE_EXCLUDES = [
   `*/${PROJECT_REPOSITORIES_DIR}/*`,
 ];
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
+const MANAGED_WORKSPACE_GIT_WORKTREE_LIST_TIMEOUT_MS = 30 * 1000;
+
+/**
+ * Paperclip's execution worktrees live wherever the agent's `worktreeParentDir`
+ * points, which a project may configure to any path inside the source folder, so
+ * no fixed list of names reaches them all. Ask the repository where its own
+ * linked worktrees are instead. A linked worktree is a separate checkout of the
+ * same repository: it is never part of this folder's uncommitted work, and
+ * copying one into a fresh checkout duplicates a whole tree that the clone
+ * already carries as history. The configured value is not available here, and
+ * naming it would not be enough anyway, because one source folder serves every
+ * agent on the project and each one configures its own parent directory.
+ */
+async function registeredWorktreeExcludes(localSource: string): Promise<string[]> {
+  const sourceRoot = await fs.realpath(localSource).catch(() => path.resolve(localSource));
+  const listed = await execFile("git", ["-C", localSource, "worktree", "list", "--porcelain"], {
+    env: { ...sanitizeRuntimeServiceBaseEnv(process.env), GIT_TERMINAL_PROMPT: "0" },
+    timeout: MANAGED_WORKSPACE_GIT_WORKTREE_LIST_TIMEOUT_MS,
+  }).then((result) => result.stdout).catch(() => "");
+  const excludes: string[] = [];
+  for (const line of listed.split("\n")) {
+    if (!line.startsWith("worktree ")) continue;
+    const listedPath = line.slice("worktree ".length).trim();
+    if (!listedPath) continue;
+    // A listed path that holds no Git metadata is either a pruned registration or
+    // a fragment this line-based parse recovered from a path containing a
+    // newline. Neither names a tree to leave out, and acting on one would drop
+    // real source work from the overlay.
+    const resolved = await fs.realpath(listedPath).catch(() => null);
+    if (!resolved) continue;
+    if (!await fs.lstat(path.join(resolved, ".git")).then(() => true).catch(() => false)) continue;
+    const relative = path.relative(sourceRoot, resolved);
+    // The main worktree is the source folder itself, and a worktree outside it is
+    // never walked. Only a path below the source folder needs an exclusion.
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    excludes.push(relative.split(path.sep).join("/"));
+  }
+  return excludes;
+}
 
 type ManagedRepositoryPreparationFailure = { code: string | number | null; timedOut: boolean };
 const preparationFailures = new WeakMap<Error, ManagedRepositoryPreparationFailure>();
@@ -198,7 +237,8 @@ export async function materializeManagedProjectWorkspace(
       if (!snapshot) throw new Error("Configured repository folder is not a Git checkout");
       let baseline;
       try {
-        baseline = await captureDirectorySnapshot(cloneTmpDir, { exclude: [".git", ...PAPERCLIP_STATE_EXCLUDES], ignoredPaths: snapshot.ignoredPaths, diskBacked: true });
+        const exclude = [".git", ...PAPERCLIP_STATE_EXCLUDES, ...await registeredWorktreeExcludes(input.localSource)];
+        baseline = await captureDirectorySnapshot(cloneTmpDir, { exclude, ignoredPaths: snapshot.ignoredPaths, diskBacked: true });
         await mergeDirectoryWithBaseline({ baseline, sourceDir: input.localSource, targetDir: cloneTmpDir });
       } finally {
         if (baseline) await disposeDirectorySnapshot(baseline);
