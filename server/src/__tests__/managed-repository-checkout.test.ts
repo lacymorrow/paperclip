@@ -145,6 +145,20 @@ describe("managed checkout source overlay", () => {
     return { source, target };
   }
 
+  // A `git` that refuses one shape of call and forwards every other one to the
+  // real binary, which the rest of the preparer still needs: the overlay runs
+  // `git ls-files -z` and `git diff -z` of its own.
+  async function selectiveGitShim(root: string, name: string, reject: { pattern: string; stderr: string; status: number }) {
+    const realGit = (await execFile("sh", ["-c", "command -v git"])).stdout.trim();
+    const dir = path.join(root, name);
+    await mkdir(dir, { recursive: true });
+    const log = path.join(dir, "refused.log");
+    await writeFile(path.join(dir, "git"), `#!/bin/sh\ncase " $* " in ${reject.pattern})`
+      + ` printf '%s\\n' "$*" >> "${log}"; echo "${reject.stderr}" >&2; exit ${reject.status};; esac\nexec "${realGit}" "$@"\n`);
+    await chmod(path.join(dir, "git"), 0o755);
+    return { dir, refused: () => readFile(log, "utf8").catch(() => "") };
+  }
+
   it.each(STATE_PAYLOADS)("leaves $label out of a prepared checkout", async ({ stateDir, payload }) => {
     const { source, target } = await sourceWithLocalState();
     expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
@@ -243,6 +257,31 @@ describe("managed checkout source overlay", () => {
     expect(await readFile(path.join(target, ...sibling), "utf8")).toBe("local\n");
   });
 
+  it("leaves a registered worktree out through the line parse on a Git without `worktree list -z`", async () => {
+    const { source, target } = await sourceWithLocalState();
+    const worktree = path.join(source, "agent-worktrees", "task-9");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "task-9", worktree]);
+    await mkdir(path.join(worktree, "node_modules"), { recursive: true });
+    await writeFile(path.join(worktree, "node_modules", "payload.txt"), "build output\n");
+    // `worktree list -z` needs Git 2.36 and CI carries 2.43+, so the shim stands in
+    // for an older Git: it refuses that one call the way such a Git does and keeps
+    // serving `-z` everywhere else, which is also what an older Git does.
+    const { dir: shim, refused } = await selectiveGitShim(path.dirname(source), "no-nul-git",
+      { pattern: '*" worktree list "*" -z "*', stderr: "error: unknown option -z", status: 129 });
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    vi.stubEnv("PATH", `${shim}:${process.env.PATH ?? ""}`);
+    expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
+    // Without this the real `-z` call may have served the listing and the rest of
+    // the test would say nothing about the fallback.
+    expect(await refused()).toContain("worktree list");
+    expect(warning).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining("git worktree list failed"));
+    // The line parse recovers this path whole, so the worktree is still left out.
+    expect(await stat(path.join(target, "agent-worktrees", "task-9")).catch(() => null)).toBeNull();
+    expect(await readdir(path.join(target, "agent-worktrees"))).toEqual([]);
+    expect(await readFile(path.join(worktree, "node_modules", "payload.txt"), "utf8")).toBe("build output\n");
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+  });
+
   it("warns and overlays every registered worktree when the worktree listing fails", async () => {
     const { source, target } = await sourceWithLocalState();
     const worktree = path.join(source, "agent-worktrees", "task-8");
@@ -250,12 +289,8 @@ describe("managed checkout source overlay", () => {
     await writeFile(path.join(worktree, "listed.txt"), "worktree work\n");
     // Only `git worktree list` fails; every other Git call the preparer makes has
     // to keep working, so the shim forwards them to the real binary.
-    const realGit = (await execFile("sh", ["-c", "command -v git"])).stdout.trim();
-    const shim = path.join(path.dirname(source), "failing-git");
-    await mkdir(shim, { recursive: true });
-    await writeFile(path.join(shim, "git"),
-      `#!/bin/sh\ncase " $* " in *" worktree list "*) echo "fixture: worktree list unavailable" >&2; exit 128;; esac\nexec ${realGit} "$@"\n`);
-    await chmod(path.join(shim, "git"), 0o755);
+    const { dir: shim } = await selectiveGitShim(path.dirname(source), "failing-git",
+      { pattern: '*" worktree list "*', stderr: "fixture: worktree list unavailable", status: 128 });
     const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
     vi.stubEnv("PATH", `${shim}:${process.env.PATH ?? ""}`);
     await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source });
