@@ -120,3 +120,44 @@ describe("atomic managed repository publication", () => {
     expect(await readFile(path.join(source, "source.txt"), "utf8")).toBe("initial\n");
   });
 });
+
+describe("managed checkout source overlay", () => {
+  const STATE_PAYLOADS = [
+    { label: "Paperclip's own per-issue worktrees", stateDir: ".paperclip/worktrees", payload: ".paperclip/worktrees/task-0/node_modules/payload.txt" },
+    { label: "a managed repositories directory below the root", stateDir: "vendored/.paperclip-repositories", payload: "vendored/.paperclip-repositories/clone-abc123/node_modules/payload.txt" },
+    { label: "a runtime directory below the root", stateDir: "vendored/.paperclip-runtime", payload: "vendored/.paperclip-runtime/session/payload.txt" },
+  ];
+  async function sourceWithLocalState() {
+    const { source, target } = await fixture();
+    // Untracked, un-ignored working-tree state. The overlay sees these because
+    // `git ls-files --others --ignored` cannot classify anything inside a
+    // nested checkout, so they arrive as ordinary content to copy.
+    for (const { payload } of STATE_PAYLOADS) {
+      await mkdir(path.join(source, path.dirname(payload)), { recursive: true });
+      await writeFile(path.join(source, payload), "build output\n");
+    }
+    await writeFile(path.join(source, "uncommitted.txt"), "local\n");
+    await writeFile(path.join(source, "vendored", "keep.txt"), "local\n");
+    // A repository is allowed to carry its own `.paperclip` configuration. The
+    // exclusion names the generated subdirectories, not the whole directory.
+    await writeFile(path.join(source, ".paperclip", "config.json"), "{}\n");
+    return { source, target };
+  }
+
+  it.each(STATE_PAYLOADS)("leaves $label out of a prepared checkout", async ({ stateDir, payload }) => {
+    const { source, target } = await sourceWithLocalState();
+    expect((await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source })).warning).toBeNull();
+    expect(await stat(path.join(target, payload)).catch(() => null)).toBeNull();
+    expect(await stat(path.join(target, stateDir)).catch(() => null)).toBeNull();
+    expect(await readFile(path.join(source, payload), "utf8")).toBe("build output\n");
+  });
+
+  it("still overlays ordinary untracked work, including beside an excluded state directory", async () => {
+    const { source, target } = await sourceWithLocalState();
+    await materializeManagedProjectWorkspace(target, { repoUrl: "https://github.com/test/source", localSource: source });
+    expect(await readFile(path.join(target, "uncommitted.txt"), "utf8")).toBe("local\n");
+    expect(await readFile(path.join(target, "vendored", "keep.txt"), "utf8")).toBe("local\n");
+    expect(await readFile(path.join(target, ".paperclip", "config.json"), "utf8")).toBe("{}\n");
+    expect(await readFile(path.join(target, "source.txt"), "utf8")).toBe("initial\n");
+  });
+});
