@@ -6,6 +6,8 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { PROJECT_REPOSITORIES_DIR, readGitWorkspaceSnapshot, disposeGitWorkspaceSnapshot } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { captureDirectorySnapshot, disposeDirectorySnapshot, mergeDirectoryWithBaseline } from "@paperclipai/adapter-utils/workspace-restore-merge";
+import { isReservedExcludePatternShape } from "@paperclipai/adapter-utils/exclude-patterns";
+import { logger } from "../middleware/logger.js";
 import { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
 import { describeGitAuthFailure, scrubGitCredentialText, type GitRemoteAuthProvider } from "./git-credentials.js";
 import { classifyGitCloneFailure, GitConnectionFailureError, readGitConnectionFailure } from "./git-connection-failure.js";
@@ -30,6 +32,7 @@ const PAPERCLIP_STATE_EXCLUDES = [
 ];
 const MANAGED_WORKSPACE_GIT_CLONE_TIMEOUT_MS = 10 * 60 * 1000;
 const MANAGED_WORKSPACE_GIT_WORKTREE_LIST_TIMEOUT_MS = 30 * 1000;
+const WORKTREE_ATTRIBUTE = "worktree ";
 
 /**
  * Paperclip's execution worktrees live wherever the agent's `worktreeParentDir`
@@ -42,20 +45,41 @@ const MANAGED_WORKSPACE_GIT_WORKTREE_LIST_TIMEOUT_MS = 30 * 1000;
  * naming it would not be enough anyway, because one source folder serves every
  * agent on the project and each one configures its own parent directory.
  */
-async function registeredWorktreeExcludes(localSource: string): Promise<string[]> {
-  const sourceRoot = await fs.realpath(localSource).catch(() => path.resolve(localSource));
-  const listed = await execFile("git", ["-C", localSource, "worktree", "list", "--porcelain"], {
+async function listRegisteredWorktreePaths(localSource: string): Promise<string[]> {
+  const list = (extra: readonly string[]) => execFile("git", ["-C", localSource, "worktree", "list", "--porcelain", ...extra], {
     env: { ...sanitizeRuntimeServiceBaseEnv(process.env), GIT_TERMINAL_PROMPT: "0" },
     timeout: MANAGED_WORKSPACE_GIT_WORKTREE_LIST_TIMEOUT_MS,
-  }).then((result) => result.stdout).catch(() => "");
+  }).then((result) => result.stdout);
+  // `exact` records that NUL-terminated output carries each path byte for byte:
+  // trimming it would corrupt a path whose own first or last character is
+  // whitespace, including the newline this format exists to carry.
+  const paths = (listed: string, separator: string, exact: boolean) => listed.split(separator)
+    .filter((entry) => entry.startsWith(WORKTREE_ATTRIBUTE))
+    .map((entry) => (exact ? entry.slice(WORKTREE_ATTRIBUTE.length) : entry.slice(WORKTREE_ATTRIBUTE.length).trim()))
+    .filter((listedPath) => listedPath.length > 0);
+  // Plain `--porcelain` emits a path containing a newline verbatim, so a
+  // line-based parse can only ever recover a fragment of one. `-z` terminates
+  // every attribute with NUL instead and keeps the path whole, and it needs Git
+  // 2.36. Paperclip states no minimum Git version and already runs `git worktree
+  // repair`, which needs 2.30, so an older Git keeps the line parse rather than
+  // losing every exclusion and silently restoring the pre-LAC-8486 overlay.
+  const terminated = await list(["-z"]).then((stdout) => paths(stdout, "\0", true), () => null);
+  if (terminated !== null) return terminated;
+  return await list([]).then((stdout) => paths(stdout, "\n", false), (error: unknown) => {
+    // Without the listing every registered worktree stays in the overlay, which
+    // is the behaviour LAC-8486 fixed. Say so rather than fail open in silence.
+    logger.warn({ err: error, localSource }, "git worktree list failed; registered worktrees stay in the managed checkout overlay");
+    return [];
+  });
+}
+
+async function registeredWorktreeExcludes(localSource: string): Promise<string[]> {
+  const sourceRoot = await fs.realpath(localSource).catch(() => path.resolve(localSource));
   const excludes: string[] = [];
-  for (const line of listed.split("\n")) {
-    if (!line.startsWith("worktree ")) continue;
-    const listedPath = line.slice("worktree ".length).trim();
-    if (!listedPath) continue;
-    // A listed path that holds no Git metadata is either a pruned registration or
-    // a fragment this line-based parse recovered from a path containing a
-    // newline. Neither names a tree to leave out, and acting on one would drop
+  for (const listedPath of await listRegisteredWorktreePaths(localSource)) {
+    // A listed path that holds no Git metadata is a pruned registration, or on a
+    // Git without `-z` a fragment the line parse recovered from a path containing
+    // a newline. Neither names a tree to leave out, and acting on one would drop
     // real source work from the overlay.
     const resolved = await fs.realpath(listedPath).catch(() => null);
     if (!resolved) continue;
@@ -64,7 +88,17 @@ async function registeredWorktreeExcludes(localSource: string): Promise<string[]
     // The main worktree is the source folder itself, and a worktree outside it is
     // never walked. Only a path below the source folder needs an exclusion.
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
-    excludes.push(relative.split(path.sep).join("/"));
+    const pattern = relative.split(path.sep).join("/");
+    // A worktree whose own first or last path segment is named `*` cannot be
+    // named as an exclusion: the pattern grammar would read it as that segment at
+    // any depth and drop unrelated source work. Leave this one in the overlay,
+    // which is what happened before the exclusion existed at all.
+    if (isReservedExcludePatternShape(pattern)) {
+      logger.warn({ localSource, worktree: pattern },
+        "registered worktree path cannot be expressed as an exclusion; it stays in the managed checkout overlay");
+      continue;
+    }
+    excludes.push(pattern);
   }
   return excludes;
 }
