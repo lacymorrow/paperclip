@@ -6019,6 +6019,58 @@ export function blockedInboxReviewWaitIssueIds(
   return [...reached].filter((issueId) => statusById.get(issueId) === "in_review");
 }
 
+/**
+ * The issue columns the blocked-inbox blocker graph reads. The graph covers every issue in the
+ * company that is not `done`, so an unprojected read carries every issue column, `description`
+ * among them, for rows the response never returns, on each board list request that asks for
+ * blocked-inbox attention. These are the only columns the consumers of `graphIssues` read
+ * (LAC-8688).
+ */
+export const blockedInboxGraphIssueColumns = {
+  id: issues.id,
+  companyId: issues.companyId,
+  identifier: issues.identifier,
+  title: issues.title,
+  status: issues.status,
+  priority: issues.priority,
+  projectId: issues.projectId,
+  goalId: issues.goalId,
+  parentId: issues.parentId,
+  assigneeAgentId: issues.assigneeAgentId,
+  assigneeUserId: issues.assigneeUserId,
+  createdByAgentId: issues.createdByAgentId,
+  createdByUserId: issues.createdByUserId,
+  conversationAgentId: issues.conversationAgentId,
+  conversationUserId: issues.conversationUserId,
+  conversationState: issues.conversationState,
+  executionPolicy: issues.executionPolicy,
+  executionState: issues.executionState,
+  monitorNextCheckAt: issues.monitorNextCheckAt,
+  monitorAttemptCount: issues.monitorAttemptCount,
+  updatedAt: issues.updatedAt,
+  originKind: issues.originKind,
+  originId: issues.originId,
+};
+
+export type BlockedInboxGraphIssue = Pick<IssueRow, keyof typeof blockedInboxGraphIssueColumns>;
+
+/**
+ * The blocker-graph issue read, separated from its caller so a test can assert the projection it
+ * selects rather than the shape of the rows it happens to return.
+ */
+export function blockedInboxGraphIssuesQuery(dbOrTx: any, companyId: string) {
+  return dbOrTx
+    .select(blockedInboxGraphIssueColumns)
+    .from(issues)
+    .where(
+      and(
+        eq(issues.companyId, companyId),
+        visibleIssueCondition(),
+        ne(issues.status, "done"),
+      ),
+    );
+}
+
 async function listIssueBlockedInboxAttentionMap(
   dbOrTx: any,
   companyId: string,
@@ -6031,16 +6083,7 @@ async function listIssueBlockedInboxAttentionMap(
 
   const [graphIssueRows, graphRelationRows, companyAgentRows] =
     await Promise.all([
-      dbOrTx
-        .select()
-        .from(issues)
-        .where(
-          and(
-            eq(issues.companyId, companyId),
-            visibleIssueCondition(),
-            ne(issues.status, "done"),
-          ),
-        ),
+      blockedInboxGraphIssuesQuery(dbOrTx, companyId),
       dbOrTx
         .select({
           companyId: issueRelations.companyId,
@@ -6068,7 +6111,7 @@ async function listIssueBlockedInboxAttentionMap(
         .where(eq(agents.companyId, companyId)),
     ]);
 
-  const graphIssues = graphIssueRows as IssueRow[];
+  const graphIssues = graphIssueRows as BlockedInboxGraphIssue[];
   const graphRelations = graphRelationRows as Array<{
     companyId: string;
     blockerIssueId: string;
@@ -6084,7 +6127,7 @@ async function listIssueBlockedInboxAttentionMap(
     reportsTo: string | null;
   }>;
   const graphIssueIds = graphIssues.map((issue) => issue.id);
-  const issuesById = new Map<string, IssueRow>(
+  const issuesById = new Map<string, BlockedInboxGraphIssue>(
     graphIssues.map((issue) => [issue.id, issue]),
   );
 
