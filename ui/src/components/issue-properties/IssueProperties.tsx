@@ -471,9 +471,15 @@ export function IssueProperties({
     enabled: !!companyId,
   });
 
+  // The pickers below read only id, parentId, identifier and title off these
+  // rows. The full view adds every description and all per-row enrichment, has
+  // no server cache behind it, and `queryKeys.issues.list` refetches on every
+  // task activity: 2.07 MB and a 238 s median on zero (LAC-8708). The shared
+  // task index is the same page of rows in the same order, and
+  // LiveUpdatesProvider rate-limits its refresh instead of storming it.
   const { data: allIssues, isFetching: isFetchingIssuePickerIssues } = useQuery({
-    queryKey: queryKeys.issues.list(companyId!),
-    queryFn: () => issuesApi.list(companyId!),
+    queryKey: queryKeys.issues.listIndex(companyId!),
+    queryFn: ({ signal }) => issuesApi.listCompact(companyId!, { projection: "index" }, { signal }),
     enabled: !!companyId && (parentOpen || (blockedByOpen && normalizedBlockedBySearch.length === 0)),
   });
 
