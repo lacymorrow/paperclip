@@ -159,9 +159,16 @@ export function CommandPalette() {
   const parsedQuery = useMemo(() => parseSearchQuery(query, parserContext), [parserContext, query]);
   const quickSearchQuery = parsedQuery.query.trim();
 
+  // The palette shows at most ten rows and reads only identifier, title and
+  // assignee from each. The full view is the whole company task list with every
+  // description and per-row enrichment, it has no server cache behind it, and
+  // `queryKeys.issues.list` refetches on every task activity: 2.07 MB and a
+  // 238 s median on zero (LAC-8708). The shared task index carries the same rows
+  // in the same order, the dashboard usually has it mounted already, and
+  // LiveUpdatesProvider rate-limits its refresh.
   const { data: issues = [] } = useQuery({
-    queryKey: queryKeys.issues.list(selectedCompanyId!),
-    queryFn: () => issuesApi.list(selectedCompanyId!),
+    queryKey: queryKeys.issues.listIndex(selectedCompanyId!),
+    queryFn: ({ signal }) => issuesApi.listCompact(selectedCompanyId!, { projection: "index" }, { signal }),
     enabled: !!selectedCompanyId && open && searchQuery.length === 0,
   });
 

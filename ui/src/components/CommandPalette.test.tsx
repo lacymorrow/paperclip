@@ -32,6 +32,7 @@ const sidebarState = vi.hoisted(() => ({
 
 const mockIssuesApi = vi.hoisted(() => ({
   list: vi.fn(),
+  listCompact: vi.fn(),
   listLabels: vi.fn(),
 }));
 
@@ -199,6 +200,7 @@ describe("CommandPalette", () => {
     dialogState.openNewAgent.mockReset();
     sidebarState.setSidebarOpen.mockReset();
     mockIssuesApi.list.mockReset();
+    mockIssuesApi.listCompact.mockReset();
     mockIssuesApi.listLabels.mockReset();
     mockAgentsApi.list.mockReset();
     mockProjectsApi.list.mockReset();
@@ -209,6 +211,7 @@ describe("CommandPalette", () => {
     locationState.location.search = "";
     locationState.location.hash = "";
     mockIssuesApi.list.mockResolvedValue([]);
+    mockIssuesApi.listCompact.mockResolvedValue([]);
     mockIssuesApi.listLabels.mockResolvedValue([]);
     mockAgentsApi.list.mockResolvedValue([]);
     mockProjectsApi.list.mockResolvedValue([]);
@@ -498,4 +501,32 @@ describe("CommandPalette", () => {
     });
   });
 
+
+  // The palette renders at most ten rows, and only identifier, title and
+  // assignee. The full view it used to request is the company's whole task list
+  // with every description and per-row enrichment: measured at 2.07 MB and a
+  // 238 s median on zero (LAC-8708). The shared task index is the same rows,
+  // already mounted by the dashboard and rate-limited on activity.
+  it("reads the shared task index instead of the full company task list", async () => {
+    const { root } = renderWithQueryClient(<CommandPalette />, container);
+
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(mockIssuesApi.listCompact).toHaveBeenCalledWith(
+        "company-1",
+        { projection: "index" },
+        expect.objectContaining({ signal: expect.anything() }),
+      );
+    });
+    // No unfiltered full-view read, which is the shape with no cache behind it.
+    expect(mockIssuesApi.list).not.toHaveBeenCalledWith("company-1");
+    expect(mockIssuesApi.list).not.toHaveBeenCalledWith("company-1", undefined);
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });

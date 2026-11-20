@@ -37,6 +37,7 @@ const mockExecutionWorkspacesApi = vi.hoisted(() => ({
 
 const mockIssuesApi = vi.hoisted(() => ({
   list: vi.fn(),
+  listCompact: vi.fn(),
   getContextUsage: vi.fn(),
   getDocument: vi.fn(),
   listAcceptedPlanDecompositions: vi.fn(),
@@ -646,6 +647,7 @@ describe("IssueProperties", () => {
     mockExecutionWorkspacesApi.list.mockResolvedValue([]);
     mockExecutionWorkspacesApi.controlRuntimeCommands.mockReset();
     mockIssuesApi.list.mockResolvedValue([]);
+    mockIssuesApi.listCompact.mockResolvedValue([]);
     mockIssuesApi.getContextUsage.mockResolvedValue(null);
     mockIssuesApi.getDocument.mockResolvedValue(null);
     mockIssuesApi.listAcceptedPlanDecompositions.mockResolvedValue([]);
@@ -1605,7 +1607,7 @@ describe("IssueProperties", () => {
 
   it("edits blockers from the blocked-by relationship flyout", async () => {
     const onUpdate = vi.fn();
-    mockIssuesApi.list.mockResolvedValue([
+    mockIssuesApi.listCompact.mockResolvedValue([
       createIssue({ id: "issue-3", identifier: "PAP-3", title: "New blocker", status: "todo" }),
     ]);
 
@@ -2681,7 +2683,7 @@ describe("IssueProperties", () => {
 
   it("allows setting and clearing a parent issue from the properties pane", async () => {
     const onUpdate = vi.fn();
-    mockIssuesApi.list.mockResolvedValue([
+    mockIssuesApi.listCompact.mockResolvedValue([
       createIssue({ id: "issue-2", identifier: "PAP-2", title: "Candidate parent", status: "in_progress" }),
     ]);
 
@@ -2787,10 +2789,11 @@ describe("IssueProperties", () => {
       status: "todo",
       priority: "low",
     });
-    mockIssuesApi.list.mockImplementation((_companyId: string, filters?: { q?: string; limit?: number }) => {
-      if (filters?.q === "needle") return Promise.resolve([lowPriorityMatch]);
-      return Promise.resolve([defaultPageCandidate]);
-    });
+    // The default page is the shared task index; only the `q` search still
+    // reads the full view.
+    mockIssuesApi.listCompact.mockResolvedValue([defaultPageCandidate]);
+    mockIssuesApi.list.mockImplementation((_companyId: string, filters?: { q?: string; limit?: number }) =>
+      filters?.q === "needle" ? Promise.resolve([lowPriorityMatch]) : Promise.resolve([]));
 
     const root = renderProperties(container, {
       issue: createIssue(),
@@ -3921,6 +3924,36 @@ describe("IssueProperties", () => {
         environmentId: null,
       },
     });
+
+    act(() => root.unmount());
+  });
+
+  // The picker needs id, parentId, identifier and title for every task in the
+  // company. The full view it used to request adds every description and all
+  // per-row enrichment, has no server cache behind it, and sits under
+  // `queryKeys.issues.list`, which refetches on every task activity: measured at
+  // 2.07 MB and a 238 s median on zero (LAC-8708).
+  it("opens the parent picker against the shared task index, not the full task list", async () => {
+    const root = renderProperties(container, {
+      issue: createIssue(), childIssues: [], onUpdate: vi.fn(), inline: true,
+    });
+
+    await flush();
+    const trigger = findRowTrigger(container, "Parent");
+    expect(trigger).toBeDefined();
+    act(() => {
+      trigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(mockIssuesApi.listCompact).toHaveBeenCalledWith(
+        "company-1",
+        { projection: "index" },
+        expect.objectContaining({ signal: expect.anything() }),
+      );
+    });
+    expect(mockIssuesApi.list).not.toHaveBeenCalledWith("company-1");
+    expect(mockIssuesApi.list).not.toHaveBeenCalledWith("company-1", undefined);
 
     act(() => root.unmount());
   });
