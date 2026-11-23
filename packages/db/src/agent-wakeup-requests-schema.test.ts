@@ -28,4 +28,21 @@ describe("agent wakeup request schema", () => {
     ]);
     expect(index?.config.where).toBeDefined();
   });
+
+  // The idempotency-key indexes above are all partial on a key prefix, so a
+  // lookup by any other prefix had no index and read the whole table. Keep one
+  // unconditional index on the pair so no future key shape loses coverage.
+  it("indexes every idempotency key, not only the prefixes with a partial index", () => {
+    const indexes = getTableConfig(agentWakeupRequests).indexes.filter(
+      (candidate) =>
+        candidate.config.where === undefined &&
+        candidate.config.columns.map((column) => (column as { name: string }).name).join(",") ===
+          "company_id,idempotency_key",
+    );
+
+    expect(indexes.map((index) => index.config.name)).toEqual([
+      "agent_wakeup_requests_company_idempotency_key_idx",
+    ]);
+    expect(indexes[0]?.config.concurrently).toBe(true);
+  });
 });

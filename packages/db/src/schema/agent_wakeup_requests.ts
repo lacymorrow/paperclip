@@ -114,5 +114,11 @@ export const agentWakeupRequests = pgTable(
       table.companyId,
       sql`(${table.payload} ->> 'issueId')`,
     ),
+    // Every other index on this column is partial on an idempotency-key prefix,
+    // so a lookup by a key outside those prefixes had no index at all and
+    // scanned the whole table. Dependency-wake coverage reads do exactly that.
+    companyIdempotencyKeyIdx: index("agent_wakeup_requests_company_idempotency_key_idx")
+      .on(table.companyId, table.idempotencyKey)
+      .concurrently(),
   }),
 );
